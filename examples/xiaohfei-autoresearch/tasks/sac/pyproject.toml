@@ -1,0 +1,19 @@
+[project]
+name = "sac-task"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "torch>=2.2",
+    "gymnasium[mujoco]>=0.29",
+    "numpy>=1.24",
+    "jaxtyping>=0.2.28",
+    "loguru>=0.7",
+    "tqdm>=4.66",
+    "wandb>=0.17",
+]
+
+[tool.uv]
+package = false
+
+[tool.ruff.lint.per-file-ignores]
+"*.py" = ["F722", "F821"]

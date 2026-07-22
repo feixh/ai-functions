@@ -1,3 +1,4 @@
+import argparse
 import copy
 import json
 from dataclasses import dataclass
@@ -399,6 +400,15 @@ def evaluate_policy(
     )
 
 
+SUPPORTED_ENVS = [
+    "Hopper-v5",
+    "Walker2d-v5",
+    "HalfCheetah-v5",
+    "Ant-v5",
+    "Humanoid-v5",
+]
+
+
 @dataclass
 class Config:
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
@@ -407,22 +417,18 @@ class Config:
     ########################################
     env_name: str = "HalfCheetah-v5"
     max_episode_steps: int = (
-        1_000  # -1: no limit; the standard for HalfCheetah is 1,000
+        1_000  # -1: no limit; standard across MuJoCo locomotion tasks
     )
-    num_episodes: int = 1_000  #
+    num_episodes: int = 1_000
     num_envs: int = 8
-    reward_scale: float = (
-        1.0  # CHANGED: keep original reward scale to avoid overpowering alpha
-    )
+    reward_scale: float = 1.0
     record_every_n_episodes: int = -1  # -1 to disable recording
-    max_timesteps_used: int = 1_000_000  # limit the training to 1 Million timesteps
+    max_timesteps_used: int = 1_000_000  # limit training to 1M timesteps
     learning_starts_at_n_timesteps: int = 1_000
 
     ########################################
     # learning-related options
     ########################################
-    # CHANGED: 0.2 is a standard starting point for HalfCheetah (but we scale down reward from 1 to 0.1,
-    # and as such scale alpha correspondingly)
     alpha: float = 0.2
     """ coefficient for the entropy term.
   Note, this can be absorbed into the scale of the reward as:
@@ -431,9 +437,7 @@ class Config:
   """
     lr: float = 3e-4  # learning rate
     gamma: float = 0.99  # discounting factor
-    replay_buffer_capacity: int = (
-        1_000_000  # Use 1e6 buffer size as recommended in the paper
-    )
+    replay_buffer_capacity: int = 1_000_000
     tau: float = 0.005  # EMA rate for target network
     batch_size: int = 256
 
@@ -447,7 +451,7 @@ class Config:
     # logging-related
     ########################################
     log_every_n_steps: int = 5_000
-    project_name: str = "sac-halfcheetah"
+    project_name: str = ""  # derived from env_name in __post_init__ if empty
     run_name: str = "dbg"
     disable_wandb: bool = True
 
@@ -463,6 +467,20 @@ class Config:
         return Path(self.workspace_dir) / self.ckpt_dir / self.run_name
 
     def __post_init__(self):
+        if self.env_name not in SUPPORTED_ENVS:
+            raise ValueError(
+                f"Unsupported env '{self.env_name}'. Choose from: {SUPPORTED_ENVS}"
+            )
+        workspace = Path(self.workspace_dir)
+        if not self.workspace_dir or not self.workspace_dir.strip():
+            raise ValueError("workspace_dir must not be empty")
+        if workspace.exists() and not workspace.is_dir():
+            raise ValueError(
+                f"workspace_dir '{self.workspace_dir}' exists but is not a directory"
+            )
+        workspace.mkdir(parents=True, exist_ok=True)
+        if not self.project_name:
+            self.project_name = f"sac-{self.env_name.lower().replace('-', '_')}"
         _ckpt_dir = self.get_ckpt_dir()
         if _ckpt_dir.exists():
             logger.warning(
@@ -640,6 +658,9 @@ def train(config: Config):
             break
 
         for _i in range(T):
+            if total_timesteps_used >= config.max_timesteps_used:
+                break
+
             total_timesteps_used += config.num_envs
             tqdm_bar.update(config.num_envs)
 
@@ -820,14 +841,63 @@ def train(config: Config):
     metric_logger.finish()
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Train SAC on a MuJoCo environment")
+    parser.add_argument(
+        "--env-name",
+        type=str,
+        default="HalfCheetah-v5",
+        choices=SUPPORTED_ENVS,
+        help="MuJoCo environment to train on",
+    )
+    parser.add_argument(
+        "--run-name", type=str, default="autoresearch-dbg", help="Name for this run"
+    )
+    parser.add_argument(
+        "--resume", action="store_true", default=True, help="Resume from checkpoint"
+    )
+    parser.add_argument(
+        "--no-resume", dest="resume", action="store_false", help="Start fresh"
+    )
+    parser.add_argument("--disable-wandb", action="store_true", default=True)
+    parser.add_argument(
+        "--max-timesteps-used", type=int, default=1_000_000, help="Training budget"
+    )
+    parser.add_argument(
+        "--workspace-dir",
+        type=str,
+        default="./workspace_rl-sac",
+        help="Root directory for checkpoints and logs (created if absent)",
+    )
+    parser.add_argument(
+        "--learning-starts-at-n-timesteps",
+        type=int,
+        default=10_000,
+        help="Timesteps of random exploration before learning begins",
+    )
+    parser.add_argument(
+        "--log-every-n-steps",
+        type=int,
+        default=1_000,
+        help="Gradient steps between metric log entries",
+    )
+    return parser.parse_args()
+
+
 def main():
+    args = parse_args()
+
     train(
         Config(
-            learning_starts_at_n_timesteps=10_000,
-            log_every_n_steps=1_000,
+            env_name=args.env_name,
+            run_name=args.run_name,
+            resume=args.resume,
+            disable_wandb=args.disable_wandb,
+            max_timesteps_used=args.max_timesteps_used,
+            workspace_dir=args.workspace_dir,
+            learning_starts_at_n_timesteps=args.learning_starts_at_n_timesteps,
+            log_every_n_steps=args.log_every_n_steps,
             save_every_n_steps=50_000,
-            run_name="black-rao-entropy-cpu-20260613-1203",
-            resume=True,  # Set to True to resume from saved checkpoints
         )
     )
 
