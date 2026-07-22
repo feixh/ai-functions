@@ -1,0 +1,33 @@
+[project]
+name = "autoresearch-example"
+version = "0.1.0"
+description = "AutoResearch — an AI-Thread that iteratively edits and re-runs an RL training script."
+requires-python = ">=3.12"
+# Dependencies specific to this RL autoresearch example, kept local to the
+# folder so they don't bloat the shared examples environment.
+dependencies = [
+    "strands-ai-functions",
+    "torch>=2.2",
+    "gymnasium[mujoco]>=0.29",
+    "numpy>=1.24",
+    "einops>=0.7",
+    "jaxtyping>=0.2.28",
+    "loguru>=0.7",
+    "tqdm>=4.66",
+    "wandb>=0.17",
+    "matplotlib>=3.8",
+]
+
+# Standalone example, not a build target and not a uv workspace member (uv forbids
+# workspace members nested inside another member such as `examples`).
+[tool.uv]
+package = false
+
+# Use the repo's local strands-ai-functions rather than the published wheel.
+[tool.uv.sources]
+strands-ai-functions = { path = "../..", editable = true }
+
+# jaxtyping shape annotations (e.g. ``Float[Tensor, "B dim_obs"]``) are string
+# literals ruff's parser reads as forward-reference syntax errors / undefined names.
+[tool.ruff.lint.per-file-ignores]
+"*.py" = ["F722", "F821"]
