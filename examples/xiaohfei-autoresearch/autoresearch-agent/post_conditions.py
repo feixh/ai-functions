@@ -12,25 +12,43 @@ from loguru import logger
 # my
 from worktree import git_worktree
 
-TIMEOUT_SECONDS = 300
 CONSIDER_LAST_N_RECORDS = 10
+MIN_SCORE = -10_000
 
 
-def train_model(script_path: Path) -> PostConditionResult:
+class PostConditionResultWithScore(PostConditionResult):
+    score: float
+
+
+def train_model(
+    script_path: Path,
+    max_timesteps_used: int = 100,
+    learning_starts_at_n_timesteps: int = 50,
+    log_every_n_steps: int = 1,
+    timeout_seconds: int = 600,
+    capture_output: bool = False,
+) -> PostConditionResultWithScore:
     """Smoke-test the edited script inside a throw-away workspace.
 
     Returns (ok, message). Checks:
     1. Python syntax is valid.
     2. Script runs to completion without crashing.
     3. metrics.jsonl contains no NaN/Inf in cumulative_reward.
+
+    Args:
+        capture_output: Whether to capture (and as such not show) the output of the subprocess to the terminal.
+            Set False for debugging (show tqdm progress bar), set True (to capture and hide the output) for production.
     """
     # script = wt_path / rel_path
 
     try:
         compile(script_path.read_text(), str(script_path), "exec")
     except SyntaxError as e:
-        return PostConditionResult(passed=False, message=f"syntax error: {e}")
+        return PostConditionResultWithScore(
+            passed=False, message=f"syntax error: {e}", score=MIN_SCORE
+        )
 
+    # TODO: run with multiple seeds to average out the variance
     with tempfile.TemporaryDirectory() as tmp:
         result = subprocess.run(
             [
@@ -40,32 +58,35 @@ def train_model(script_path: Path) -> PostConditionResult:
                 "--env-name",
                 "HalfCheetah-v5",
                 "--max-timesteps-used",
-                "100",
+                f"{max_timesteps_used}",
                 "--learning-starts-at-n-timesteps",
-                "50",
+                f"{learning_starts_at_n_timesteps}",
                 "--log-every-n-steps",
-                "1",
+                f"{log_every_n_steps}",
                 "--no-resume",
                 "--workspace-dir",
                 tmp,
             ],
-            capture_output=False,  # set False for debugging (show tqdm progress bar), set True for production
+            capture_output=capture_output,
             text=True,
-            timeout=TIMEOUT_SECONDS,
+            timeout=timeout_seconds,
             cwd=script_path.parent,
         )
 
         if result.returncode != 0:
             stderr_tail = result.stderr[-2000:] if result.stderr else "(no stderr)"
-            return PostConditionResult(
+            return PostConditionResultWithScore(
                 passed=False,
                 message=f"script crashed (exit {result.returncode}):\n{stderr_tail}",
+                score=MIN_SCORE,
             )
 
         jsonl_files = list(Path(tmp).glob("**/*.jsonl"))
         if not jsonl_files:
-            return PostConditionResult(
-                passed=False, message="script ran but produced no metrics.jsonl"
+            return PostConditionResultWithScore(
+                passed=False,
+                message="script ran but produced no metrics.jsonl",
+                score=MIN_SCORE,
             )
 
         records = [
@@ -76,21 +97,25 @@ def train_model(script_path: Path) -> PostConditionResult:
         ]
         rewards = [r["cumulative_reward"] for r in records if "cumulative_reward" in r]
         if not rewards:
-            return PostConditionResult(
+            return PostConditionResultWithScore(
                 passed=True,
                 message=f"ran OK — {len(records)} records logged (no reward entries yet)",
+                score=MIN_SCORE,
             )
 
         bad = [r for r in rewards if math.isnan(r) or math.isinf(r)]
         if bad:
-            return PostConditionResult(
-                passed=False, message=f"NaN/Inf in cumulative_reward: {bad[:5]}"
+            return PostConditionResultWithScore(
+                passed=False,
+                message=f"NaN/Inf in cumulative_reward: {bad[:5]}",
+                score=MIN_SCORE,
             )
 
         robust_last_reward = np.median(rewards[-CONSIDER_LAST_N_RECORDS:])
-        return PostConditionResult(
+        return PostConditionResultWithScore(
             passed=True,
             message=f"ran OK — {len(records)} records, last reward={robust_last_reward:.2f}",
+            score=robust_last_reward,
         )
 
 

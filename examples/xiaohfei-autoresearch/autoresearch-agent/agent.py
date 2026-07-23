@@ -6,11 +6,13 @@ Usage:
 
 import argparse
 import asyncio
+import concurrent.futures
 import subprocess
 import textwrap
 import uuid
 from pathlib import Path
 
+import numpy as np
 import rich.box
 from ai_functions import ai_function
 from ai_functions.ai_thread import PostConditionResult
@@ -63,15 +65,27 @@ class ApplyResult(BaseModel):
     message: str
 
 
-@tool
-def read_file(path: str) -> str:
-    """Read and return the contents of a file at the given path."""
-    return Path(path).read_text()
+class Score(BaseModel):
+    num_runs: int
+    mean: float
+    std: float
+
+
+class ApplyInBranchResult(BaseModel):
+    branch: str
+    score: Score
 
 
 class ResearchIdea(BaseModel):
     summary: str
     description: str
+    result: ApplyInBranchResult
+
+
+@tool
+def read_file(path: str) -> str:
+    """Read and return the contents of a file at the given path."""
+    return Path(path).read_text()
 
 
 @ai_function(coordinator_tools_enabled=False, tools=[read_file], model=_MODEL)
@@ -142,6 +156,36 @@ def _repo_root(path: Path) -> Path:
     return Path(result.stdout.strip())
 
 
+def _current_branch(repo_root: Path) -> str:
+    result = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return result.stdout.strip()
+
+
+def merge_branch(repo_root: Path, branch: str) -> None:
+    """Fast-forward the checked-out branch to include ``branch``.
+
+    ``branch`` was created from the checked-out branch's HEAD and that HEAD has
+    not moved since (the loop is single-threaded and only advances via this
+    function), so the merge is always a fast-forward. ``--ff-only`` makes that
+    invariant explicit: it fails loudly rather than silently creating a merge
+    commit if the assumption is ever violated. The fast-forward also updates the
+    main working tree, so the next idea's worktree (branched from HEAD) and the
+    proposer (which reads the script from the working tree) both see the
+    accumulated code with no extra plumbing.
+    """
+    subprocess.run(
+        ["git", "merge", "--ff-only", branch],
+        cwd=repo_root,
+        check=True,
+    )
+
+
 def make_worktree_tools(wt_path: Path):
     @tool
     def read_file(path: str) -> str:
@@ -208,7 +252,40 @@ async def make_reseach_idea(
         await handle.terminate_now()
 
 
-async def apply_in_branch(script_path: str, idea: str) -> str:
+def _get_score(absolute_script_path: Path, n_runs: int = 5) -> Score:
+    # TODO: We may need to seed the train.py script itself.
+    # But, since we are using async environment, the async nature of multiple environments
+    # will make the outcome of train.py stochastic. So maybe, we don't really need seed here.
+
+    # The training script is not seeded, so independent runs genuinely differ;
+    # averaging their scores reduces the variance of the reported number. Each
+    # ``train_model`` call runs the script in its own tempdir, so the runs do not
+    # collide, and ``subprocess.run`` releases the GIL, so a thread pool gives
+    # real parallelism.
+    def _run(_: int) -> float:
+        return train_model(
+            absolute_script_path,
+            max_timesteps_used=5_000,
+            learning_starts_at_n_timesteps=1_000,
+            log_every_n_steps=100,
+            timeout_seconds=3600 * 10,  # 10 hours
+        ).score
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=n_runs) as executor:
+        scores = np.array(list(executor.map(_run, range(n_runs))))
+
+    avg_score = np.mean(scores)
+    std_score = np.std(scores)
+    logger.info(
+        f"scores over {n_runs} runs: "
+        f"{', '.join(f'{s:.2f}' for s in scores)} -> avg {avg_score:.2f}; std {std_score}"
+    )
+    return Score(num_runs=n_runs, mean=avg_score, std=std_score)
+
+
+async def apply_in_branch(
+    script_path: str, summary: str, description: str
+) -> ApplyInBranchResult:
     repo_root = _repo_root(Path(script_path))
     rel_path = Path(script_path).resolve().relative_to(repo_root)
     branch = f"autoresearch-{uuid.uuid4().hex[:8]}"
@@ -237,11 +314,22 @@ async def apply_in_branch(script_path: str, idea: str) -> str:
         )
         try:
             with handle.coordinator.on(_on_event, thread_id=handle.id):
-                await handle.run(script_path=wt_script, idea=idea)
+                await handle.run(script_path=wt_script, idea=description)
         finally:
             await handle.terminate_now()
 
-    return branch
+        console.print(
+            Panel(
+                summary,
+                title="training with the idea below",
+                box=rich.box.DOUBLE,
+            )
+        )
+        score = _get_score(absolute_wt_script_path)
+
+        print(f"{score=}")
+
+    return ApplyInBranchResult(branch=branch, score=score)
 
 
 def parse_args():
@@ -256,7 +344,21 @@ def parse_args():
 def main():
     args = parse_args()
 
+    repo_root = _repo_root(Path(args.script))
+    base_branch = _current_branch(repo_root)
+
     tried_ideas: list[ResearchIdea] = []
+
+    console.print(
+        Panel(
+            "",
+            title="Baseline",
+            box=rich.box.DOUBLE,
+        )
+    )
+    best_score = _get_score(Path(args.script).absolute()).mean
+    logger.info(f"baseline score = {best_score:0.3f}")
+
     for _ in range(args.max_num_ideas):
         idea: ResearchIdea = asyncio.run(
             make_reseach_idea(
@@ -278,13 +380,38 @@ def main():
             )
         )
 
-        branch = asyncio.run(apply_in_branch(args.script, idea.description))
+        result = asyncio.run(
+            apply_in_branch(
+                args.script, summary=idea.summary, description=idea.description
+            )
+        )
         console.print(
-            f"\n[bold green]done.[/] Changes committed on branch [cyan]{branch}[/]\n"
-            f"Review with: [dim]git diff main...{branch}[/]"
+            f"\n[bold green]done.[/] Changes committed on branch [cyan]{result.branch}[/]\n"
+            f"Review with: [dim]git diff {base_branch}...{result.branch}[/]"
         )
 
+        idea.result = result
         tried_ideas.append(idea)
+
+        # Greedy hill-climb: only keep an idea if it beats the best score so far.
+        # Merging fast-forwards ``base_branch`` (and its working tree) to the
+        # winning idea, so the next proposal and the next worktree build on the
+        # accumulated code. Ideas that don't improve are left on their branch and
+        # abandoned.
+        if result.score.mean > best_score:
+            merge_branch(repo_root, result.branch)
+            best_score = result.score.mean
+            console.print(
+                f"[bold green]accepted[/] — new best score "
+                f"[cyan]{best_score:.2f}[/], merged into [cyan]{base_branch}[/]"
+            )
+            # TODO: log the tried ideas, their score, and whether they are accepted
+        else:
+            console.print(
+                f"[bold yellow]rejected[/] — score [cyan]{result.score.mean:.2f}[/] "
+                f"did not beat best [cyan]{best_score:.2f}[/]; "
+                f"changes left on branch [cyan]{result.branch}[/]"
+            )
 
 
 if __name__ == "__main__":
