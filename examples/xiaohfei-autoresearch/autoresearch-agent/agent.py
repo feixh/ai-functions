@@ -71,15 +71,50 @@ class Score(BaseModel):
     std: float
 
 
-class ApplyInBranchResult(BaseModel):
+class ExperimentResult(BaseModel):
     branch: str
+    """
+    The branch where the experiment is conducted.
+    """
+
     score: Score
+    """
+    TODO: Score is probably not a good name; we should also carry and log the artifacts
+    of the experiment (e.g., the logs)
+    The score of the experiment.
+    """
 
 
 class ResearchIdea(BaseModel):
     summary: str
     description: str
-    result: ApplyInBranchResult
+
+
+class ExperimentSummary(BaseModel):
+    """The summary of an experiment (an experiment tests a research idea)."""
+
+    idea: ResearchIdea
+    """
+    The idea being tested
+    """
+
+    result: ExperimentResult
+
+
+class ExperimentRecord(BaseModel):
+    """One iteration of the hill-climb loop, persisted to the results log."""
+
+    iteration: int
+    """0-based index of this idea in the loop."""
+
+    idea: ResearchIdea
+    result: ExperimentResult
+
+    accepted: bool
+    """Whether the idea beat the prior best score and was merged."""
+
+    best_score: float
+    """The running best mean score *after* this iteration."""
 
 
 @tool
@@ -232,7 +267,7 @@ async def make_reseach_idea(
     if summary_tried_ideas:
         numbered = "\n".join(
             f"[{i:4d}]:: {summary}"
-            for i, summary in enumerate(summary_tried_ideas, start=1)
+            for i, summary in enumerate(summary_tried_ideas, start=0)
         )
         console.print(
             Panel(
@@ -285,7 +320,7 @@ def _get_score(absolute_script_path: Path, n_runs: int = 5) -> Score:
 
 async def apply_in_branch(
     script_path: str, summary: str, description: str
-) -> ApplyInBranchResult:
+) -> ExperimentResult:
     repo_root = _repo_root(Path(script_path))
     rel_path = Path(script_path).resolve().relative_to(repo_root)
     branch = f"autoresearch-{uuid.uuid4().hex[:8]}"
@@ -329,7 +364,19 @@ async def apply_in_branch(
 
         print(f"{score=}")
 
-    return ApplyInBranchResult(branch=branch, score=score)
+    return ExperimentResult(branch=branch, score=score)
+
+
+def append_record(results_path: Path, record: ExperimentRecord) -> None:
+    """Append one experiment record to the results log as a line of JSON.
+
+    JSONL (append-per-iteration) rather than a single JSON dump at the end so a
+    crash or interrupt mid-loop keeps every experiment already completed — each
+    ``train_model`` run can take hours, so partial results are worth preserving.
+    """
+    results_path.parent.mkdir(parents=True, exist_ok=True)
+    with results_path.open("a") as f:
+        f.write(record.model_dump_json() + "\n")
 
 
 def parse_args():
@@ -337,6 +384,12 @@ def parse_args():
     parser.add_argument("--script", type=str, help="Path to the script to be improved.")
     parser.add_argument(
         "--max-num-ideas", type=int, default=5, help="Maximum number of ideas to try."
+    )
+    parser.add_argument(
+        "--results-path",
+        type=str,
+        default="autoresearch_results.jsonl",
+        help="Path to the JSONL file where experiment records are appended.",
     )
     return parser.parse_args()
 
@@ -346,6 +399,13 @@ def main():
 
     repo_root = _repo_root(Path(args.script))
     base_branch = _current_branch(repo_root)
+
+    # Resolve to an absolute path so the log lands where the user expects
+    # regardless of any CWD changes (e.g. git-worktree work) later on.
+    results_path = Path(args.results_path).absolute()
+    # Start each run clean: drop records from any previous run.
+    results_path.unlink(missing_ok=True)
+    logger.info(f"writing experiment records to {results_path}")
 
     tried_ideas: list[ResearchIdea] = []
 
@@ -359,7 +419,7 @@ def main():
     best_score = _get_score(Path(args.script).absolute()).mean
     logger.info(f"baseline score = {best_score:0.3f}")
 
-    for _ in range(args.max_num_ideas):
+    for iteration in range(args.max_num_ideas):
         idea: ResearchIdea = asyncio.run(
             make_reseach_idea(
                 args.script,
@@ -390,28 +450,39 @@ def main():
             f"Review with: [dim]git diff {base_branch}...{result.branch}[/]"
         )
 
-        idea.result = result
-        tried_ideas.append(idea)
-
         # Greedy hill-climb: only keep an idea if it beats the best score so far.
         # Merging fast-forwards ``base_branch`` (and its working tree) to the
         # winning idea, so the next proposal and the next worktree build on the
         # accumulated code. Ideas that don't improve are left on their branch and
         # abandoned.
-        if result.score.mean > best_score:
+        accepted = result.score.mean > best_score
+        if accepted:
             merge_branch(repo_root, result.branch)
-            best_score = result.score.mean
             console.print(
                 f"[bold green]accepted[/] — new best score "
-                f"[cyan]{best_score:.2f}[/], merged into [cyan]{base_branch}[/]"
+                f"[cyan]{result.score.mean:.2f}[/] (better han prior best [cyan]{best_score:0.2f}[/]; "
+                f"merged into [cyan]{base_branch}[/]"
             )
-            # TODO: log the tried ideas, their score, and whether they are accepted
+            best_score = result.score.mean
         else:
             console.print(
                 f"[bold yellow]rejected[/] — score [cyan]{result.score.mean:.2f}[/] "
                 f"did not beat best [cyan]{best_score:.2f}[/]; "
                 f"changes left on branch [cyan]{result.branch}[/]"
             )
+
+        append_record(
+            results_path,
+            ExperimentRecord(
+                iteration=iteration,
+                idea=idea,
+                result=result,
+                accepted=accepted,
+                best_score=best_score,
+            ),
+        )
+
+        tried_ideas.append(idea)
 
 
 if __name__ == "__main__":
