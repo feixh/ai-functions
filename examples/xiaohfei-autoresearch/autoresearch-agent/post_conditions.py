@@ -56,7 +56,6 @@ def train_model(
             passed=False, message=f"syntax error: {e}", score=MIN_SCORE
         )
 
-    # TODO: run with multiple seeds to average out the variance
     with tempfile.TemporaryDirectory() as tmp:
         result = subprocess.run(
             [

@@ -1,0 +1,625 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ title }} — autoresearch</title>
+<style>
+  :root {
+    color-scheme: light;
+    --surface-1: #fcfcfb;
+    --page: #f9f9f7;
+    --text-primary: #0b0b0b;
+    --text-secondary: #52514e;
+    --muted: #898781;
+    --grid: #e1e0d9;
+    --axis: #c3c2b7;
+    --border: rgba(11,11,11,0.10);
+    --series-1: #2a78d6;  /* blue  */
+    --series-2: #eb6834;  /* orange */
+    --series-3: #1baf7a;  /* aqua  */
+    --series-4: #eda100;  /* yellow */
+    --series-5: #e87ba4;  /* magenta */
+    --series-6: #008300;  /* green */
+    --good: #0ca30c;
+    --good-text: #006300;
+    --critical: #d03b3b;
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --surface-1: #1a1a19;
+    --page: #0d0d0d;
+    --text-primary: #ffffff;
+    --text-secondary: #c3c2b7;
+    --muted: #898781;
+    --grid: #2c2c2a;
+    --axis: #383835;
+    --border: rgba(255,255,255,0.10);
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --series-3: #199e70;
+    --series-4: #c98500;
+    --series-5: #d55181;
+    --series-6: #008300;
+    --good: #0ca30c;
+    --good-text: #0ca30c;
+    --critical: #d03b3b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--page); color: var(--text-primary);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-size: 14px; line-height: 1.5;
+  }
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 32px 24px 80px; }
+  header { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+  h1 { font-size: 22px; margin: 0 0 2px; font-weight: 650; }
+  .sub { color: var(--text-secondary); margin: 0; }
+  h2 { font-size: 15px; font-weight: 600; margin: 36px 0 12px; letter-spacing: .01em; }
+  .toggle {
+    border: 1px solid var(--border); background: var(--surface-1);
+    color: var(--text-secondary); border-radius: 8px; padding: 6px 12px;
+    cursor: pointer; font: inherit; font-size: 13px;
+  }
+  .toggle:hover { color: var(--text-primary); }
+
+  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px,1fr)); gap: 12px; margin-top: 20px; }
+  .kpi {
+    background: var(--surface-1); border: 1px solid var(--border);
+    border-radius: 12px; padding: 16px 18px;
+  }
+  .kpi .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  .kpi .value { font-size: 30px; font-weight: 650; margin-top: 4px; }
+  .kpi .delta { font-size: 13px; margin-top: 2px; color: var(--text-secondary); }
+  .kpi .delta.up { color: var(--good-text); }
+
+  .card {
+    background: var(--surface-1); border: 1px solid var(--border);
+    border-radius: 12px; padding: 18px 20px; margin-top: 12px;
+  }
+  .controls { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
+  label.ctl { color: var(--text-secondary); font-size: 13px; display: inline-flex; gap: 6px; align-items: center; }
+  select {
+    font: inherit; font-size: 13px; padding: 4px 8px; border-radius: 7px;
+    border: 1px solid var(--border); background: var(--surface-1); color: var(--text-primary);
+  }
+  svg { display: block; width: 100%; height: auto; overflow: visible; }
+  .legend { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 10px; font-size: 13px; color: var(--text-secondary); }
+  .legend .item { display: inline-flex; gap: 6px; align-items: center; }
+  .swatch { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+  .swatch.line { height: 3px; border-radius: 2px; width: 16px; }
+
+  .axis-label { fill: var(--muted); font-size: 11px; }
+  .tick text { fill: var(--muted); font-size: 11px; }
+  .tick line { stroke: var(--grid); }
+  .axis-title { fill: var(--text-secondary); font-size: 12px; }
+
+  table { width: 100%; border-collapse: collapse; margin-top: 4px; }
+  th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--grid); vertical-align: top; }
+  th { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .03em; font-weight: 600; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .pill { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+  .pill.acc { color: var(--good-text); background: color-mix(in srgb, var(--good) 15%, transparent); }
+  .pill.rej { color: var(--text-secondary); background: color-mix(in srgb, var(--muted) 18%, transparent); }
+  tr.rowbtn { cursor: pointer; }
+  tr.rowbtn:hover td { background: color-mix(in srgb, var(--muted) 8%, transparent); }
+  .desc-row td { background: color-mix(in srgb, var(--muted) 5%, transparent); }
+  .hidden { display: none; }
+
+  /* rendered-markdown idea descriptions */
+  .md { color: var(--text-secondary); font-size: 13px; }
+  .md > *:first-child { margin-top: 0; }
+  .md > *:last-child { margin-bottom: 0; }
+  .md p { margin: 8px 0; }
+  .md h1, .md h2, .md h3, .md h4, .md h5, .md h6 {
+    color: var(--text-primary); font-weight: 600; margin: 14px 0 6px; line-height: 1.3;
+    text-transform: none; letter-spacing: 0;
+  }
+  .md h1 { font-size: 17px; } .md h2 { font-size: 15px; } .md h3 { font-size: 14px; }
+  .md h4, .md h5, .md h6 { font-size: 13px; }
+  .md ul, .md ol { margin: 8px 0; padding-left: 22px; }
+  .md li { margin: 2px 0; }
+  .md code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
+    background: color-mix(in srgb, var(--muted) 16%, transparent); padding: 1px 5px; border-radius: 4px;
+  }
+  .md pre {
+    background: color-mix(in srgb, var(--muted) 12%, transparent); border: 1px solid var(--border);
+    border-radius: 8px; padding: 10px 12px; overflow: auto; margin: 10px 0;
+  }
+  .md pre code { background: none; padding: 0; font-size: 12px; line-height: 1.45; }
+  .md a { color: var(--series-1); text-decoration: none; }
+  .md a:hover { text-decoration: underline; }
+  .md blockquote { margin: 8px 0; padding: 2px 12px; border-left: 3px solid var(--border); color: var(--muted); }
+  .md strong { color: var(--text-primary); font-weight: 600; }
+  .md hr { border: none; border-top: 1px solid var(--grid); margin: 12px 0; }
+
+  .tip {
+    position: fixed; pointer-events: none; z-index: 10; opacity: 0;
+    background: var(--surface-1); border: 1px solid var(--border);
+    border-radius: 8px; padding: 8px 10px; font-size: 12px; color: var(--text-primary);
+    box-shadow: 0 4px 16px rgba(0,0,0,.15); transition: opacity .08s; max-width: 260px;
+  }
+  .tip .t-title { font-weight: 600; margin-bottom: 3px; }
+  .tip .t-row { color: var(--text-secondary); }
+  .tip b { color: var(--text-primary); font-variant-numeric: tabular-nums; }
+  .empty { color: var(--muted); padding: 24px 0; text-align: center; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>Autoresearch results</h1>
+      <p class="sub" id="subtitle"></p>
+    </div>
+    <button class="toggle" id="themeBtn">◐ Theme</button>
+  </header>
+
+  <div class="kpis" id="kpis"></div>
+
+  <h2>Score progression</h2>
+  <p class="sub" style="margin-top:-4px">Mean cumulative return per idea (± std over runs). The greedy hill-climb keeps an idea only when it beats the running best.</p>
+  <div class="card">
+    <div id="progression"></div>
+    <div class="legend" id="prog-legend"></div>
+  </div>
+
+  <h2>Training curves</h2>
+  <p class="sub" style="margin-top:-4px">Per-iteration training metric over time — mean across runs, shaded ± std, individual runs faint.</p>
+  <div class="card">
+    <div class="controls">
+      <label class="ctl">Metric
+        <select id="metricSel"></select>
+      </label>
+      <label class="ctl">x-axis
+        <select id="xSel"></select>
+      </label>
+      <label class="ctl">View
+        <select id="viewSel">
+          <option value="all">Compare all iterations</option>
+          <option value="single">Single iteration (with runs)</option>
+        </select>
+      </label>
+      <label class="ctl hidden" id="iterCtl">Iteration
+        <select id="iterSel"></select>
+      </label>
+    </div>
+    <div id="curves"></div>
+    <div class="legend" id="curve-legend"></div>
+  </div>
+
+  <h2>Ideas tried</h2>
+  <div class="card" style="padding:6px 8px">
+    <table id="ideaTable"></table>
+  </div>
+</div>
+<div class="tip" id="tip"></div>
+
+<script id="payload" type="application/json">{{ data_json | safe }}</script>
+{% raw %}
+<script>
+const DATA = JSON.parse(document.getElementById('payload').textContent);
+const tip = document.getElementById('tip');
+const SERIES = ['--series-1','--series-2','--series-3','--series-4','--series-5','--series-6'];
+const cssv = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+
+function fmt(x, d=2) {
+  if (x === null || x === undefined || Number.isNaN(x)) return '—';
+  return Number(x).toLocaleString(undefined, {minimumFractionDigits:d, maximumFractionDigits:d});
+}
+function showTip(html, evt) {
+  tip.innerHTML = html; tip.style.opacity = 1;
+  const pad = 14, w = tip.offsetWidth, h = tip.offsetHeight;
+  let x = evt.clientX + pad, y = evt.clientY + pad;
+  if (x + w > innerWidth) x = evt.clientX - w - pad;
+  if (y + h > innerHeight) y = evt.clientY - h - pad;
+  tip.style.left = x + 'px'; tip.style.top = y + 'px';
+}
+function hideTip() { tip.style.opacity = 0; }
+
+// ---- helpers -------------------------------------------------------------
+function niceTicks(min, max, n=5) {
+  if (min === max) { min -= 1; max += 1; }
+  const span = max - min;
+  const step0 = span / n;
+  const mag = Math.pow(10, Math.floor(Math.log10(step0)));
+  const norm = step0 / mag;
+  const step = (norm >= 5 ? 5 : norm >= 2 ? 2 : 1) * mag;
+  const lo = Math.floor(min / step) * step;
+  const hi = Math.ceil(max / step) * step;
+  const ticks = [];
+  for (let v = lo; v <= hi + step*1e-6; v += step) ticks.push(v);
+  return ticks;
+}
+const SVGNS = 'http://www.w3.org/2000/svg';
+function el(tag, attrs={}, parent=null) {
+  const n = document.createElementNS(SVGNS, tag);
+  for (const k in attrs) n.setAttribute(k, attrs[k]);
+  if (parent) parent.appendChild(n);
+  return n;
+}
+
+// ---- KPIs ----------------------------------------------------------------
+function renderKpis() {
+  const its = DATA.iterations;
+  const accepted = its.filter(d => d.accepted);
+  const best = its.length ? its[its.length-1].best_score : null;
+  const baseline = DATA.baseline;
+  const kpis = [
+    {label: 'Ideas tried', value: String(its.length)},
+    {label: 'Accepted', value: `${accepted.length} / ${its.length}`},
+    {label: 'Best score', value: fmt(best), delta: baseline!=null && best!=null
+        ? `${best>=baseline?'▲':'▼'} ${fmt(best-baseline)} vs baseline` : null,
+        up: baseline!=null && best!=null && best>baseline},
+    {label: 'Baseline', value: fmt(baseline)},
+  ];
+  const root = document.getElementById('kpis');
+  root.innerHTML = kpis.map(k => `
+    <div class="kpi">
+      <div class="label">${k.label}</div>
+      <div class="value" style="font-variant-numeric:tabular-nums">${k.value}</div>
+      ${k.delta ? `<div class="delta ${k.up?'up':''}">${k.delta}</div>` : ''}
+    </div>`).join('');
+
+  document.getElementById('subtitle').textContent =
+    `${its.length} iterations · best mean return ${fmt(best)}` +
+    (baseline!=null ? ` (baseline ${fmt(baseline)})` : '');
+}
+
+// ---- Score progression chart --------------------------------------------
+function renderProgression() {
+  const its = DATA.iterations;
+  const host = document.getElementById('progression');
+  host.innerHTML = '';
+  if (!its.length) { host.innerHTML = '<div class="empty">No iterations.</div>'; return; }
+
+  const W = host.clientWidth || 900, H = 340;
+  const m = {t: 16, r: 20, b: 44, l: 64};
+  const iw = W - m.l - m.r, ih = H - m.t - m.b;
+  const svg = el('svg', {viewBox:`0 0 ${W} ${H}`, width:W, height:H});
+
+  const xs = its.map(d => d.iteration);
+  const xmin = Math.min(...xs), xmax = Math.max(...xs);
+  const vals = [];
+  its.forEach(d => {
+    if (d.mean!=null) { vals.push(d.mean + (d.std||0)); vals.push(d.mean - (d.std||0)); }
+    if (d.best_score!=null) vals.push(d.best_score);
+  });
+  if (DATA.baseline!=null) vals.push(DATA.baseline);
+  const yTicks = niceTicks(Math.min(...vals), Math.max(...vals), 5);
+  const ymin = yTicks[0], ymax = yTicks[yTicks.length-1];
+
+  const pad = its.length > 1 ? 0.5 : 0.0;
+  const sx = v => m.l + ( (v - xmin + pad) / ((xmax - xmin) + 2*pad || 1) ) * iw;
+  const sy = v => m.t + (1 - (v - ymin) / (ymax - ymin)) * ih;
+
+  // gridlines + y ticks
+  yTicks.forEach(t => {
+    const g = el('g', {class:'tick'}, svg);
+    el('line', {x1:m.l, x2:m.l+iw, y1:sy(t), y2:sy(t)}, g);
+    const tx = el('text', {x:m.l-8, y:sy(t), 'text-anchor':'end', 'dominant-baseline':'middle'}, g);
+    tx.textContent = fmt(t, 0);
+  });
+  // x ticks (one per iteration)
+  its.forEach(d => {
+    const g = el('g', {class:'tick'}, svg);
+    const tx = el('text', {x:sx(d.iteration), y:m.t+ih+18, 'text-anchor':'middle'}, g);
+    tx.textContent = '#'+d.iteration;
+  });
+  el('text', {x:m.l+iw/2, y:H-4, 'text-anchor':'middle', class:'axis-title'}, svg)
+    .textContent = 'iteration';
+  const yt = el('text', {x:14, y:m.t+ih/2, 'text-anchor':'middle', class:'axis-title',
+    transform:`rotate(-90 14 ${m.t+ih/2})`}, svg);
+  yt.textContent = 'mean cumulative return';
+
+  // baseline reference line
+  if (DATA.baseline!=null) {
+    el('line', {x1:m.l, x2:m.l+iw, y1:sy(DATA.baseline), y2:sy(DATA.baseline),
+      stroke:cssv('--muted'), 'stroke-width':1.5, 'stroke-dasharray':'5 4'}, svg);
+    el('text', {x:m.l+iw, y:sy(DATA.baseline)-5, 'text-anchor':'end', class:'axis-label'}, svg)
+      .textContent = 'baseline';
+  }
+
+  // running-best step line (emphasis, blue)
+  const blue = cssv('--series-1');
+  let bestPath = '';
+  its.forEach((d,i) => {
+    const x = sx(d.iteration), y = sy(d.best_score);
+    if (i===0) bestPath += `M ${x} ${y}`;
+    else { const px = sx(its[i-1].iteration); bestPath += ` L ${px} ${y} L ${x} ${y}`; }
+  });
+  el('path', {d:bestPath, fill:'none', stroke:blue, 'stroke-width':2,
+    'stroke-linejoin':'round', opacity:0.9}, svg);
+
+  // error bars + points colored by accepted/rejected (status)
+  const good = cssv('--good'), rej = cssv('--muted');
+  its.forEach(d => {
+    if (d.mean==null) return;
+    const x = sx(d.iteration), y = sy(d.mean);
+    const c = d.accepted ? good : rej;
+    if (d.std) {
+      const yHi = sy(d.mean + d.std), yLo = sy(d.mean - d.std);
+      el('line', {x1:x, x2:x, y1:yHi, y2:yLo, stroke:c, 'stroke-width':1.5, opacity:.55}, svg);
+      el('line', {x1:x-4, x2:x+4, y1:yHi, y2:yHi, stroke:c, 'stroke-width':1.5, opacity:.55}, svg);
+      el('line', {x1:x-4, x2:x+4, y1:yLo, y2:yLo, stroke:c, 'stroke-width':1.5, opacity:.55}, svg);
+    }
+    el('circle', {cx:x, cy:y, r:6, fill:c, stroke:cssv('--surface-1'), 'stroke-width':2}, svg);
+    const hit = el('circle', {cx:x, cy:y, r:14, fill:'transparent'}, svg);
+    const html = `<div class="t-title">Iteration #${d.iteration} · ${d.accepted?'accepted':'rejected'}</div>`
+      + `<div class="t-row">mean <b>${fmt(d.mean)}</b> ± ${fmt(d.std)} (${d.num_runs} runs)</div>`
+      + `<div class="t-row">running best <b>${fmt(d.best_score)}</b></div>`
+      + `<div class="t-row" style="margin-top:4px">${d.summary}</div>`;
+    hit.addEventListener('mousemove', e => showTip(html, e));
+    hit.addEventListener('mouseleave', hideTip);
+  });
+
+  host.appendChild(svg);
+  document.getElementById('prog-legend').innerHTML = `
+    <span class="item"><span class="swatch line" style="background:${blue}"></span>running best</span>
+    <span class="item"><span class="swatch" style="background:${good}"></span>accepted</span>
+    <span class="item"><span class="swatch" style="background:${rej}"></span>rejected</span>
+    ${DATA.baseline!=null?'<span class="item"><span class="swatch line" style="background:'+rej+';opacity:.6"></span>baseline</span>':''}`;
+}
+
+// ---- Training curves -----------------------------------------------------
+function meanStd(arr) {
+  const n = arr.length; if (!n) return [null,null];
+  const mu = arr.reduce((a,b)=>a+b,0)/n;
+  const v = arr.reduce((a,b)=>a+(b-mu)*(b-mu),0)/n;
+  return [mu, Math.sqrt(v)];
+}
+// Aggregate runs of one iteration into mean±std series keyed on the x metric.
+function aggregate(runs, xk, yk) {
+  const byX = new Map();
+  runs.forEach(run => run.forEach(pt => {
+    if (pt[xk]==null || pt[yk]==null) return;
+    if (!byX.has(pt[xk])) byX.set(pt[xk], []);
+    byX.get(pt[xk]).push(pt[yk]);
+  }));
+  return [...byX.keys()].sort((a,b)=>a-b).map(x => {
+    const [mu,sd] = meanStd(byX.get(x));
+    return {x, mu, sd, n: byX.get(x).length};
+  });
+}
+
+function renderCurves() {
+  const host = document.getElementById('curves');
+  host.innerHTML = '';
+  const xk = document.getElementById('xSel').value;
+  const yk = document.getElementById('metricSel').value;
+  const view = document.getElementById('viewSel').value;
+  if (!yk || !xk) { host.innerHTML = '<div class="empty">No metric data.</div>'; return; }
+
+  const its = DATA.iterations.filter(d => d.runs && d.runs.length);
+  if (!its.length) { host.innerHTML = '<div class="empty">No training curves logged.</div>'; return; }
+
+  // Build the series to draw.
+  let series = [];  // {label, iter, color, agg, runs?}
+  if (view === 'single') {
+    const idx = +document.getElementById('iterSel').value;
+    const d = DATA.iterations[idx];
+    series.push({label:`#${d.iteration}`, iter:d.iteration,
+      color: cssv(SERIES[0]), agg: aggregate(d.runs, xk, yk), runs: d.runs});
+  } else {
+    its.forEach((d,i) => series.push({label:`#${d.iteration}`, iter:d.iteration,
+      color: cssv(SERIES[i % SERIES.length]), agg: aggregate(d.runs, xk, yk)}));
+  }
+  series = series.filter(s => s.agg.length);
+  if (!series.length) { host.innerHTML = '<div class="empty">Selected metric not present in these runs.</div>'; return; }
+
+  const W = host.clientWidth || 900, H = 360;
+  const m = {t: 16, r: 20, b: 46, l: 66};
+  const iw = W - m.l - m.r, ih = H - m.t - m.b;
+  const svg = el('svg', {viewBox:`0 0 ${W} ${H}`, width:W, height:H});
+
+  let xmin=Infinity,xmax=-Infinity,ymin=Infinity,ymax=-Infinity;
+  series.forEach(s => s.agg.forEach(p => {
+    xmin=Math.min(xmin,p.x); xmax=Math.max(xmax,p.x);
+    ymin=Math.min(ymin,p.mu-(p.sd||0)); ymax=Math.max(ymax,p.mu+(p.sd||0));
+  }));
+  if (view==='single') series.forEach(s => (s.runs||[]).forEach(run => run.forEach(pt => {
+    if (pt[yk]!=null){ ymin=Math.min(ymin,pt[yk]); ymax=Math.max(ymax,pt[yk]); }
+  })));
+  const yTicks = niceTicks(ymin, ymax, 5);
+  ymin = yTicks[0]; ymax = yTicks[yTicks.length-1];
+  const xTicks = niceTicks(xmin, xmax, 6).filter(t => t>=xmin-1e-9 && t<=xmax+1e-9);
+
+  const sx = v => m.l + (xmax===xmin ? 0.5 : (v-xmin)/(xmax-xmin)) * iw;
+  const sy = v => m.t + (1 - (v-ymin)/(ymax-ymin)) * ih;
+
+  yTicks.forEach(t => {
+    const g = el('g', {class:'tick'}, svg);
+    el('line', {x1:m.l, x2:m.l+iw, y1:sy(t), y2:sy(t)}, g);
+    el('text', {x:m.l-8, y:sy(t), 'text-anchor':'end', 'dominant-baseline':'middle'}, g)
+      .textContent = fmt(t, 0);
+  });
+  xTicks.forEach(t => {
+    const g = el('g', {class:'tick'}, svg);
+    el('text', {x:sx(t), y:m.t+ih+18, 'text-anchor':'middle'}, g).textContent = fmt(t,0);
+  });
+  el('text', {x:m.l+iw/2, y:H-6, 'text-anchor':'middle', class:'axis-title'}, svg).textContent = xk;
+  el('text', {x:16, y:m.t+ih/2, 'text-anchor':'middle', class:'axis-title',
+    transform:`rotate(-90 16 ${m.t+ih/2})`}, svg).textContent = yk;
+
+  const line = pts => pts.map((p,i)=>`${i?'L':'M'} ${sx(p.x)} ${sy(p.mu)}`).join(' ');
+
+  // single view: faint individual runs first
+  if (view==='single') series.forEach(s => (s.runs||[]).forEach(run => {
+    const pts = run.filter(pt => pt[xk]!=null && pt[yk]!=null)
+                   .sort((a,b)=>a[xk]-b[xk]);
+    if (pts.length<2) return;
+    const d = pts.map((p,i)=>`${i?'L':'M'} ${sx(p[xk])} ${sy(p[yk])}`).join(' ');
+    el('path', {d, fill:'none', stroke:s.color, 'stroke-width':1, opacity:.18}, svg);
+  }));
+
+  // std bands (drawn when we have >1 run at a point)
+  series.forEach(s => {
+    if (s.agg.every(p => !p.sd || p.n<2)) return;
+    const up = s.agg.map(p=>`${sx(p.x)},${sy(p.mu+p.sd)}`);
+    const dn = s.agg.slice().reverse().map(p=>`${sx(p.x)},${sy(p.mu-p.sd)}`);
+    el('polygon', {points:[...up,...dn].join(' '), fill:s.color, opacity:.12, stroke:'none'}, svg);
+  });
+
+  // mean lines
+  series.forEach(s => {
+    el('path', {d:line(s.agg), fill:'none', stroke:s.color, 'stroke-width':2,
+      'stroke-linejoin':'round'}, svg);
+    s.agg.forEach(p => {
+      el('circle', {cx:sx(p.x), cy:sy(p.mu), r:3.5, fill:s.color}, svg);
+      const hit = el('circle', {cx:sx(p.x), cy:sy(p.mu), r:11, fill:'transparent'}, svg);
+      const html = `<div class="t-title">Iteration ${s.label}</div>`
+        + `<div class="t-row">${xk} <b>${fmt(p.x,0)}</b></div>`
+        + `<div class="t-row">${yk} <b>${fmt(p.mu)}</b>${p.n>1?` ± ${fmt(p.sd)}`:''}</div>`
+        + (p.n>1?`<div class="t-row">${p.n} runs</div>`:'');
+      hit.addEventListener('mousemove', e => showTip(html, e));
+      hit.addEventListener('mouseleave', hideTip);
+    });
+  });
+
+  host.appendChild(svg);
+
+  // legend
+  const leg = document.getElementById('curve-legend');
+  if (view==='all' && series.length>1) {
+    leg.innerHTML = series.map(s =>
+      `<span class="item"><span class="swatch line" style="background:${s.color}"></span>iter ${s.label}</span>`).join('');
+  } else {
+    leg.innerHTML = `<span class="item"><span class="swatch line" style="background:${series[0].color}"></span>mean</span>`
+      + `<span class="item"><span class="swatch" style="background:${series[0].color};opacity:.18"></span>individual runs / ± std</span>`;
+  }
+}
+
+// ---- Idea table ----------------------------------------------------------
+function renderTable() {
+  const t = document.getElementById('ideaTable');
+  const rows = DATA.iterations.map(d => `
+    <tr class="rowbtn" data-iter="${d.iteration}">
+      <td class="num">#${d.iteration}</td>
+      <td>${escapeHtml(d.summary)}</td>
+      <td class="num">${fmt(d.mean)} <span style="color:var(--muted)">± ${fmt(d.std)}</span></td>
+      <td class="num">${fmt(d.best_score)}</td>
+      <td><span class="pill ${d.accepted?'acc':'rej'}">${d.accepted?'accepted':'rejected'}</span></td>
+    </tr>
+    <tr class="desc-row hidden" data-desc="${d.iteration}">
+      <td></td><td colspan="4"><div class="md">${renderMarkdown(d.description)}</div>
+        <div style="color:var(--muted);margin-top:6px">branch: ${escapeHtml(d.branch)}</div></td>
+    </tr>`).join('');
+  t.innerHTML = `<thead><tr>
+      <th>Iter</th><th>Idea</th><th style="text-align:right">Score</th>
+      <th style="text-align:right">Best</th><th>Verdict</th>
+    </tr></thead><tbody>${rows}</tbody>`;
+  t.querySelectorAll('tr.rowbtn').forEach(tr => tr.addEventListener('click', () => {
+    const d = t.querySelector(`tr[data-desc="${tr.dataset.iter}"]`);
+    d.classList.toggle('hidden');
+  }));
+}
+function escapeHtml(s='') {
+  return s.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+}
+
+// Minimal, dependency-free markdown -> HTML for idea descriptions. Input is
+// HTML-escaped first, so the transforms below only ever inject known-safe tags.
+// Supports headings, fenced/inline code, lists, blockquotes, hr, links, bold,
+// italic and paragraphs — enough for the LLM-authored idea write-ups.
+function renderMarkdown(src='') {
+  const codeBlocks = [];
+  // Pull out fenced code blocks first so their contents aren't touched by
+  // inline formatting; ``` fences may carry an (ignored) language hint.
+  let text = src.replace(/```[^\n]*\n([\s\S]*?)```/g, (_, code) => {
+    codeBlocks.push(code.replace(/\n$/, ''));
+    return `@@CODE${codeBlocks.length - 1}@@`;
+  });
+  text = escapeHtml(text);
+
+  const inline = (s) => s
+    .replace(/`([^`]+)`/g, (_, c) => `<code>${c}</code>`)
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
+      (_, t, href) => `<a href="${href}" target="_blank" rel="noopener">${t}</a>`)
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>');
+
+  const lines = text.split('\n');
+  const out = [];
+  let list = null;      // 'ul' | 'ol'
+  let para = [];        // buffered paragraph lines
+  let quote = [];       // buffered blockquote lines
+  const flushPara = () => { if (para.length) { out.push(`<p>${inline(para.join(' '))}</p>`); para = []; } };
+  const flushList = () => { if (list) { out.push(`</${list}>`); list = null; } };
+  const flushQuote = () => {
+    if (quote.length) { out.push(`<blockquote>${inline(quote.join(' '))}</blockquote>`); quote = []; }
+  };
+  const flushAll = () => { flushPara(); flushList(); flushQuote(); };
+
+  for (const raw of lines) {
+    const line = raw.trimEnd();
+    let m;
+    if (/^\s*$/.test(line)) { flushAll(); continue; }
+    if ((m = line.match(/^@@CODE(\d+)@@$/))) {
+      flushAll();
+      out.push(`<pre><code>${escapeHtml(codeBlocks[+m[1]])}</code></pre>`);
+    } else if ((m = line.match(/^(#{1,6})\s+(.*)$/))) {
+      flushAll();
+      const lvl = m[1].length;
+      out.push(`<h${lvl}>${inline(m[2])}</h${lvl}>`);
+    } else if (/^\s*([-*_])\1{2,}\s*$/.test(line)) {
+      flushAll();
+      out.push('<hr>');
+    } else if ((m = line.match(/^\s*&gt;\s?(.*)$/))) {
+      // '>' was HTML-escaped to '&gt;' above, so match the escaped marker.
+      flushPara(); flushList();
+      quote.push(m[1]);
+    } else if ((m = line.match(/^\s*[-*+]\s+(.*)$/))) {
+      flushPara(); flushQuote();
+      if (list !== 'ul') { flushList(); out.push('<ul>'); list = 'ul'; }
+      out.push(`<li>${inline(m[1])}</li>`);
+    } else if ((m = line.match(/^\s*\d+[.)]\s+(.*)$/))) {
+      flushPara(); flushQuote();
+      if (list !== 'ol') { flushList(); out.push('<ol>'); list = 'ol'; }
+      out.push(`<li>${inline(m[1])}</li>`);
+    } else {
+      flushList(); flushQuote();
+      para.push(line.trim());
+    }
+  }
+  flushAll();
+  return out.join('\n');
+}
+
+// ---- controls / init -----------------------------------------------------
+function initControls() {
+  const ms = document.getElementById('metricSel');
+  ms.innerHTML = DATA.metrics.map(m =>
+    `<option value="${m}" ${m===DATA.defaultMetric?'selected':''}>${m}</option>`).join('');
+  const xs = document.getElementById('xSel');
+  xs.innerHTML = DATA.xKeys.map(x =>
+    `<option value="${x}" ${x===DATA.defaultX?'selected':''}>${x}</option>`).join('');
+  const is = document.getElementById('iterSel');
+  is.innerHTML = DATA.iterations.map((d,i) =>
+    `<option value="${i}">#${d.iteration} — ${d.summary.slice(0,40)}${d.summary.length>40?'…':''}</option>`).join('');
+
+  document.getElementById('viewSel').addEventListener('change', e => {
+    document.getElementById('iterCtl').classList.toggle('hidden', e.target.value!=='single');
+    renderCurves();
+  });
+  [ms, xs, is].forEach(s => s.addEventListener('change', renderCurves));
+}
+
+function renderAll() { renderKpis(); renderProgression(); renderCurves(); renderTable(); }
+
+document.getElementById('themeBtn').addEventListener('click', () => {
+  const cur = document.documentElement.getAttribute('data-theme');
+  const next = cur === 'dark' ? 'light'
+    : (cur === 'light' ? 'dark'
+      : (matchMedia('(prefers-color-scheme: dark)').matches ? 'light' : 'dark'));
+  document.documentElement.setAttribute('data-theme', next);
+  renderAll();
+});
+
+initControls();
+renderAll();
+let rt; addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(renderAll, 150); });
+</script>
+{% endraw %}
+</body>
+</html>

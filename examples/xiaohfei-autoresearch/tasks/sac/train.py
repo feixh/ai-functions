@@ -3,6 +3,7 @@ import copy
 import json
 import os
 import random
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -704,6 +705,9 @@ def train(config: Config):
         total=config.max_timesteps_used, initial=total_timesteps_used, desc="Training"
     )  # Get the tqdm object
 
+    # Record the wall-clock start time so we can log the elapsed training time.
+    train_start_time = time.monotonic()
+
     # Seed the gym env streams. ``reset`` seeds the initial-state RNG and
     # ``action_space.seed`` the (separate) random-exploration sampler used before
     # learning starts. AsyncVectorEnv derives a distinct per-worker stream from
@@ -862,6 +866,7 @@ def train(config: Config):
                         "cumulative_reward": eval_result.average_cumulative_reward
                         / config.reward_scale,
                         "entropy": eval_result.entropy,
+                        "elapsed_time_s": time.monotonic() - train_start_time,
                     }
                     tqdm_bar.set_postfix(
                         {

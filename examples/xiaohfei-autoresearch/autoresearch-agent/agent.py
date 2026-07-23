@@ -49,6 +49,8 @@ PERFORMANCE_MEASURE = textwrap.dedent("""
     - The overall performance of the implementation is measured by the average performance across all the tasks considered.
 """)
 
+console = Console()
+
 
 class EditStep(BaseModel):
     description: str
@@ -129,7 +131,8 @@ def read_file(path: str) -> str:
 def propose_idea(script_path: str, summary_tried_ideas: list[str]) -> ResearchIdea:
     return textwrap.dedent(f"""
     You are an expert in reinforcement learning.
-    Your job is to propose algorithmic ideas to improve the performance of a given implementation of a reinforcement learning algorithm.
+    Your job is to propose algorithmic ideas (including hyperparameter tuning, architecture improvement,
+    or engineering tircks) to improve the performance of a given implementation of a reinforcement learning algorithm.
 
     The implementation can be found here: {script_path}
 
@@ -143,6 +146,7 @@ def propose_idea(script_path: str, summary_tried_ideas: list[str]) -> ResearchId
     - The idea needs to be concrete and actionable, that is, one can follow this idea to implement the algorithm easily.
     - You should **not** change the high-level algorithm. For example, if the original implementation is a soft actor-critic (SAC) algorithm, you cannot change it to Proximal Policy Optimization (PPO).
     - Return a concise summary of the idea and a detailed description of the idea.
+    - The proposed idea shouldn't significantly slow down the training and inference of the algorithm. If the idea can potentially slow down the algorithm **a lot**, don't propose the idea.
 
     """)  # type: ignore
 
@@ -155,7 +159,8 @@ def _dummy(abs_script_path: Path) -> PostConditionResult | None:
 @ai_function(coordinator_tools_enabled=False)
 def experiment_idea(script_path: str, idea: str) -> str:
     return textwrap.dedent(f"""
-    You are an expert Python developer and reinforcement learning engineer. Implement and apply the research idea to the script to improve the algorithm's performance.
+    You are an expert Python developer and reinforcement learning engineer.
+    Implement and apply the research idea to the script to improve the algorithm's performance.
 
     {PERFORMANCE_MEASURE}
 
@@ -170,9 +175,6 @@ def experiment_idea(script_path: str, idea: str) -> str:
 
     Return a message confirming what has been done.
     """)
-
-
-console = Console()
 
 
 def _on_event(event: object) -> None:
@@ -310,9 +312,9 @@ def _get_score(
         # whole result, not just ``.score``, to keep the training curve.
         return train_model(
             absolute_script_path,
-            max_timesteps_used=100,
-            learning_starts_at_n_timesteps=50,
-            log_every_n_steps=1,
+            max_timesteps_used=1_000_000,
+            learning_starts_at_n_timesteps=1_000,
+            log_every_n_steps=100,
             timeout_seconds=3600 * 10,  # 10 hours
             capture_output=False,
             seed=seed,
@@ -355,7 +357,12 @@ async def apply_in_branch(
                 "model": _MODEL,
                 "post_conditions": [
                     lambda _: _dummy(absolute_wt_script_path),
-                    lambda _: train_model(absolute_wt_script_path),
+                    lambda _: train_model(
+                        absolute_wt_script_path,
+                        max_timesteps_used=20,
+                        learning_starts_at_n_timesteps=10,
+                        log_every_n_steps=2,
+                    ),
                 ],
             }
 
@@ -396,7 +403,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--script", type=str, help="Path to the script to be improved.")
     parser.add_argument(
-        "--max-num-ideas", type=int, default=5, help="Maximum number of ideas to try."
+        "--max-num-ideas", type=int, default=20, help="Maximum number of ideas to try."
     )
     parser.add_argument(
         "--results-path",
@@ -502,8 +509,8 @@ def main():
                             f"changes left on branch [cyan]{result.branch}[/]"
                         ),
                     ),
-                    title="[bold yellow]rejected[/]",
-                    border_style="yellow",
+                    title="[bold red]rejected[/]",
+                    border_style="red",
                     box=rich.box.DOUBLE,
                 )
             )
