@@ -1,6 +1,8 @@
 import argparse
 import copy
 import json
+import os
+import random
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -14,6 +16,34 @@ from loguru import logger
 from torch import Tensor, nn
 from torch.optim import Adam
 from tqdm.auto import tqdm  # Import tqdm for progress bar
+
+
+################################################################################
+# Reproducibility
+################################################################################
+def seed_everything(seed: int, *, deterministic_cudnn: bool = True) -> None:
+    """Seed all RNGs that affect training so a run is reproducible.
+
+    Covers Python's ``random``, NumPy's global RNG, and PyTorch (CPU + all CUDA
+    devices). Also sets ``PYTHONHASHSEED`` so hash-based ordering is stable.
+
+    Gym env streams (``env.reset(seed=...)``, ``env.action_space.seed(...)``)
+    are seeded separately at their call sites -- they don't draw from these RNGs.
+
+    Args:
+        seed: The base seed.
+        deterministic_cudnn: When True, force cuDNN into deterministic mode
+            (``deterministic=True``, ``benchmark=False``). Reproducible but can
+            be slightly slower; set False to trade determinism for speed.
+    """
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    if deterministic_cudnn:
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
 
 
 ################################################################################
@@ -360,15 +390,23 @@ class EvaluationResult:
 
 
 def evaluate_policy(
-    eval_env: gym.vector.VectorEnv, policy: PolicyNetwork, T: int, device: str
+    eval_env: gym.vector.VectorEnv,
+    policy: PolicyNetwork,
+    T: int,
+    device: str,
+    seed: int | None = None,
 ) -> EvaluationResult:
     """Evaluate the policy on the given environment.
 
     The caller needs to
     1/ set the policy network to eval mode (and then set it back to train), and
     2/ scale the reward to the original scale.
+
+    Pass ``seed`` to make evaluation deterministic: the eval env is reset to the
+    same initial states on every call, so the returned reward reflects policy
+    changes rather than a shifting evaluation distribution.
     """
-    obs, info = eval_env.reset()
+    obs, info = eval_env.reset(seed=seed)
 
     cumulative_reward = []
     entropy = []
@@ -412,6 +450,15 @@ SUPPORTED_ENVS = [
 @dataclass
 class Config:
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
+    ########################################
+    # reproducibility options
+    ########################################
+    seed: int = 0
+    """ Base seed for all RNGs (Python, NumPy, PyTorch, and gym env streams). """
+    deterministic_cudnn: bool = True
+    """ Force cuDNN into deterministic mode. Reproducible but can be slightly
+    slower on GPU; set False to trade determinism for speed. """
+
     ########################################
     # environment-related options
     ########################################
@@ -563,6 +610,13 @@ def train(config: Config):
         checkpoint = torch.load(ckpt_path, map_location=config.device)
         run_id = checkpoint.get("run_id", None)
 
+    # Seed all RNGs before anything stochastic happens (network weight init,
+    # env resets, action sampling). On resume, offset by the resumed step so we
+    # continue the stochastic stream instead of replaying it from the start.
+    resumed_step = checkpoint.get("global_step", 0) if checkpoint is not None else 0
+    seed = config.seed + resumed_step
+    seed_everything(seed, deterministic_cudnn=config.deterministic_cudnn)
+
     metric_logger = MetricLogger(config, run_id=run_id)
 
     # Create vectorized environment
@@ -650,7 +704,12 @@ def train(config: Config):
         total=config.max_timesteps_used, initial=total_timesteps_used, desc="Training"
     )  # Get the tqdm object
 
-    obs, info = env.reset()
+    # Seed the gym env streams. ``reset`` seeds the initial-state RNG and
+    # ``action_space.seed`` the (separate) random-exploration sampler used before
+    # learning starts. AsyncVectorEnv derives a distinct per-worker stream from
+    # the base seed, so the workers don't share an identical trajectory.
+    env.action_space.seed(seed)
+    obs, info = env.reset(seed=seed)
 
     for _episode in range(config.num_episodes):
         # collect enough timesteps, break
@@ -785,7 +844,11 @@ def train(config: Config):
                     # currently the reward is computed using a changing policy
                     policy.eval()
                     eval_result = evaluate_policy(
-                        eval_env=eval_env, policy=policy, T=T, device=config.device
+                        eval_env=eval_env,
+                        policy=policy,
+                        T=T,
+                        device=config.device,
+                        seed=config.seed + 10_000,
                     )
                     policy.train()
 
@@ -853,6 +916,7 @@ def parse_args():
     parser.add_argument(
         "--run-name", type=str, default="autoresearch-dbg", help="Name for this run"
     )
+    parser.add_argument("--seed", type=int, default=0, help="Base seed for all RNGs")
     parser.add_argument(
         "--resume", action="store_true", default=True, help="Resume from checkpoint"
     )
@@ -891,6 +955,7 @@ def main():
         Config(
             env_name=args.env_name,
             run_name=args.run_name,
+            seed=args.seed,
             resume=args.resume,
             disable_wandb=args.disable_wandb,
             max_timesteps_used=args.max_timesteps_used,

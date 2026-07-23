@@ -7,6 +7,7 @@ Usage:
 import argparse
 import asyncio
 import concurrent.futures
+import hashlib
 import subprocess
 import textwrap
 import uuid
@@ -20,7 +21,7 @@ from ai_functions.ai_thread.config import ThreadKwargs
 from ai_functions.types.events import MessageAssistantTokenEvent, ToolCallEvent
 from botocore.config import Config as BotocoreConfig
 from loguru import logger
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from rich.console import Console, Group
 from rich.markdown import Markdown
 from rich.panel import Panel
@@ -31,7 +32,7 @@ from strands.models.bedrock import BedrockModel
 
 # isort: off
 # Local sibling modules — keep grouped and in this order (ruff must not resort).
-from post_conditions import train_model
+from post_conditions import PostConditionResultWithScore, train_model
 from worktree import git_worktree
 
 # isort: on
@@ -78,11 +79,12 @@ class ExperimentResult(BaseModel):
     """
 
     score: Score
-    """
-    TODO: Score is probably not a good name; we should also carry and log the artifacts
-    of the experiment (e.g., the logs)
-    The score of the experiment.
-    """
+    """The score of the experiment."""
+
+    run_metrics: list[list[dict]] = Field(default_factory=list)
+    """Per-run training curves: ``run_metrics[i]`` is the parsed metrics.jsonl
+    records for run ``i``. Captured from each ``train_model`` call so the full
+    training log is persisted alongside the summary score."""
 
 
 class ResearchIdea(BaseModel):
@@ -287,27 +289,40 @@ async def make_reseach_idea(
         await handle.terminate_now()
 
 
-def _get_score(absolute_script_path: Path, n_runs: int = 5) -> Score:
-    # TODO: We may need to seed the train.py script itself.
-    # But, since we are using async environment, the async nature of multiple environments
-    # will make the outcome of train.py stochastic. So maybe, we don't really need seed here.
-
+def _get_score(
+    absolute_script_path: Path, n_runs: int = 16
+) -> tuple[Score, list[list[dict]]]:
     # The training script is not seeded, so independent runs genuinely differ;
     # averaging their scores reduces the variance of the reported number. Each
     # ``train_model`` call runs the script in its own tempdir, so the runs do not
     # collide, and ``subprocess.run`` releases the GIL, so a thread pool gives
     # real parallelism.
-    def _run(_: int) -> float:
+    def _run(idx: int) -> PostConditionResultWithScore:
+        # Derive a well-spread, deterministic seed by hashing the run index.
+        # A blake2b digest scatters adjacent indices across the 32-bit range,
+        # avoiding the trivial 0, 1, 2, ... sequence that ``idx`` alone gives.
+        seed = int.from_bytes(
+            hashlib.blake2b(str(idx).encode(), digest_size=4).digest(), "big"
+        )
+
+        # The metrics.jsonl lives in a tempdir that ``train_model`` deletes on
+        # return, so it parses and hands back the records here — capture the
+        # whole result, not just ``.score``, to keep the training curve.
         return train_model(
             absolute_script_path,
-            max_timesteps_used=5_000,
-            learning_starts_at_n_timesteps=1_000,
-            log_every_n_steps=100,
+            max_timesteps_used=100,
+            learning_starts_at_n_timesteps=50,
+            log_every_n_steps=1,
             timeout_seconds=3600 * 10,  # 10 hours
-        ).score
+            capture_output=False,
+            seed=seed,
+        )
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=n_runs) as executor:
-        scores = np.array(list(executor.map(_run, range(n_runs))))
+        results = list(executor.map(_run, range(n_runs)))
+
+    scores = np.array([r.score for r in results])
+    run_metrics = [r.metrics for r in results]
 
     avg_score = np.mean(scores)
     std_score = np.std(scores)
@@ -315,7 +330,7 @@ def _get_score(absolute_script_path: Path, n_runs: int = 5) -> Score:
         f"scores over {n_runs} runs: "
         f"{', '.join(f'{s:.2f}' for s in scores)} -> avg {avg_score:.2f}; std {std_score}"
     )
-    return Score(num_runs=n_runs, mean=avg_score, std=std_score)
+    return Score(num_runs=n_runs, mean=avg_score, std=std_score), run_metrics
 
 
 async def apply_in_branch(
@@ -360,11 +375,9 @@ async def apply_in_branch(
                 box=rich.box.DOUBLE,
             )
         )
-        score = _get_score(absolute_wt_script_path)
+        score, run_metrics = _get_score(absolute_wt_script_path)
 
-        print(f"{score=}")
-
-    return ExperimentResult(branch=branch, score=score)
+    return ExperimentResult(branch=branch, score=score, run_metrics=run_metrics)
 
 
 def append_record(results_path: Path, record: ExperimentRecord) -> None:
@@ -409,6 +422,7 @@ def main():
 
     tried_ideas: list[ResearchIdea] = []
 
+    # Generate baseline results.
     console.print(
         Panel(
             "",
@@ -416,9 +430,10 @@ def main():
             box=rich.box.DOUBLE,
         )
     )
-    best_score = _get_score(Path(args.script).absolute()).mean
+    best_score = _get_score(Path(args.script).absolute())[0].mean
     logger.info(f"baseline score = {best_score:0.3f}")
 
+    # Propose and experiment ideas.
     for iteration in range(args.max_num_ideas):
         idea: ResearchIdea = asyncio.run(
             make_reseach_idea(
@@ -459,16 +474,38 @@ def main():
         if accepted:
             merge_branch(repo_root, result.branch)
             console.print(
-                f"[bold green]accepted[/] — new best score "
-                f"[cyan]{result.score.mean:.2f}[/] (better han prior best [cyan]{best_score:0.2f}[/]; "
-                f"merged into [cyan]{base_branch}[/]"
+                Panel(
+                    Group(
+                        Text(idea.summary, style="bold"),
+                        Text(),
+                        Text.from_markup(
+                            f"new best score [cyan]{result.score.mean:.2f}[/] "
+                            f"(beat prior best [cyan]{best_score:.2f}[/]); "
+                            f"merged into [cyan]{base_branch}[/]"
+                        ),
+                    ),
+                    title="[bold green]accepted[/]",
+                    border_style="green",
+                    box=rich.box.DOUBLE,
+                )
             )
             best_score = result.score.mean
         else:
             console.print(
-                f"[bold yellow]rejected[/] — score [cyan]{result.score.mean:.2f}[/] "
-                f"did not beat best [cyan]{best_score:.2f}[/]; "
-                f"changes left on branch [cyan]{result.branch}[/]"
+                Panel(
+                    Group(
+                        Text(idea.summary, style="bold"),
+                        Text(),
+                        Text.from_markup(
+                            f"score [cyan]{result.score.mean:.2f}[/] "
+                            f"did not beat best [cyan]{best_score:.2f}[/]; "
+                            f"changes left on branch [cyan]{result.branch}[/]"
+                        ),
+                    ),
+                    title="[bold yellow]rejected[/]",
+                    border_style="yellow",
+                    box=rich.box.DOUBLE,
+                )
             )
 
         append_record(

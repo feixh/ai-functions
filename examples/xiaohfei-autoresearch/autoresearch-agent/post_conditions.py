@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 from ai_functions.ai_thread import PostConditionResult
 from loguru import logger
+from pydantic import Field
 
 # my
 from worktree import git_worktree
@@ -18,6 +19,12 @@ MIN_SCORE = -10_000
 
 class PostConditionResultWithScore(PostConditionResult):
     score: float
+    metrics: list[dict] = Field(default_factory=list)
+    """Parsed records from the run's metrics.jsonl file(s).
+
+    Captured before the temporary workspace is deleted so callers can persist
+    the training curve. Empty when the script crashed or produced no metrics.
+    """
 
 
 def train_model(
@@ -27,6 +34,7 @@ def train_model(
     log_every_n_steps: int = 1,
     timeout_seconds: int = 600,
     capture_output: bool = False,
+    seed: int = 0,
 ) -> PostConditionResultWithScore:
     """Smoke-test the edited script inside a throw-away workspace.
 
@@ -63,6 +71,8 @@ def train_model(
                 f"{learning_starts_at_n_timesteps}",
                 "--log-every-n-steps",
                 f"{log_every_n_steps}",
+                "--seed",
+                f"{seed}",
                 "--no-resume",
                 "--workspace-dir",
                 tmp,
@@ -116,6 +126,7 @@ def train_model(
             passed=True,
             message=f"ran OK — {len(records)} records, last reward={robust_last_reward:.2f}",
             score=robust_last_reward,
+            metrics=records,
         )
 
 
