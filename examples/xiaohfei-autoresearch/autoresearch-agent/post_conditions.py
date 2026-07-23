@@ -13,7 +13,7 @@ from pydantic import Field
 # my
 from worktree import git_worktree
 
-CONSIDER_LAST_N_RECORDS = 10
+CONSIDER_LAST_N_RECORDS = 5
 MIN_SCORE = -10_000
 
 

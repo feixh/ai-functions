@@ -314,7 +314,7 @@ def _get_score(
             absolute_script_path,
             max_timesteps_used=1_000_000,
             learning_starts_at_n_timesteps=1_000,
-            log_every_n_steps=100,
+            log_every_n_steps=1_000,
             timeout_seconds=3600 * 10,  # 10 hours
             capture_output=False,
             seed=seed,
