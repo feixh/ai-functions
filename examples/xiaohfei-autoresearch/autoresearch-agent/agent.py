@@ -19,9 +19,11 @@ from ai_functions.types.events import MessageAssistantTokenEvent, ToolCallEvent
 from botocore.config import Config as BotocoreConfig
 from loguru import logger
 from pydantic import BaseModel
-from rich.console import Console
+from rich.console import Console, Group
+from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.syntax import Syntax
+from rich.text import Text
 from strands import tool
 from strands.models.bedrock import BedrockModel
 
@@ -67,8 +69,13 @@ def read_file(path: str) -> str:
     return Path(path).read_text()
 
 
+class ResearchIdea(BaseModel):
+    summary: str
+    description: str
+
+
 @ai_function(coordinator_tools_enabled=False, tools=[read_file], model=_MODEL)
-def propose_idea(script_path: str) -> str:
+def propose_idea(script_path: str, summary_tried_ideas: list[str]) -> ResearchIdea:
     return textwrap.dedent(f"""
     You are an expert in reinforcement learning.
     Your job is to propose algorithmic ideas to improve the performance of a given implementation of a reinforcement learning algorithm.
@@ -77,10 +84,14 @@ def propose_idea(script_path: str) -> str:
 
     {PERFORMANCE_MEASURE}
 
+    ## Summary of ideas that have been tried already
+    {summary_tried_ideas}
+
     ## Requirement
-    - Please provide exactly one idea in the form of a string with markdown syntax.
+    - Please provide exactly one idea that does not overlap with ideas that have been tried already.
     - The idea needs to be concrete and actionable, that is, one can follow this idea to implement the algorithm easily.
     - You should **not** change the high-level algorithm. For example, if the original implementation is a soft actor-critic (SAC) algorithm, you cannot change it to Proximal Policy Optimization (PPO).
+    - Return a concise summary of the idea and a detailed description of the idea.
 
     """)  # type: ignore
 
@@ -161,20 +172,38 @@ def make_worktree_tools(wt_path: Path):
     return read_file, write_file, commit_changes
 
 
-async def make_edit_plan(script_path: str) -> str:
-    script_content = Path(script_path).read_text()
-    console.print(
-        Panel(
-            Syntax(script_content, "python", line_numbers=True, theme="default"),
-            title=f"script: {script_path}",
-            box=rich.box.DOUBLE,
+async def make_reseach_idea(
+    script_path: str, summary_tried_ideas: list[str], print_src_code: bool = False
+) -> ResearchIdea:
+    if print_src_code:
+        script_content = Path(script_path).read_text()
+        console.print(
+            Panel(
+                Syntax(script_content, "python", line_numbers=True, theme="default"),
+                title=f"script: {script_path}",
+                box=rich.box.DOUBLE,
+            )
         )
-    )
+
+    if summary_tried_ideas:
+        numbered = "\n".join(
+            f"[{i:4d}]:: {summary}"
+            for i, summary in enumerate(summary_tried_ideas, start=1)
+        )
+        console.print(
+            Panel(
+                numbered,
+                title=f"Summary of Tried Ideas ({len(summary_tried_ideas)})",
+                box=rich.box.DOUBLE,
+            )
+        )
 
     handle = await propose_idea.spawn()
     try:
         with handle.coordinator.on(_on_event, thread_id=handle.id):
-            return await handle.run(script_path=script_path)
+            return await handle.run(
+                script_path=script_path, summary_tried_ideas=summary_tried_ideas
+            )
     finally:
         await handle.terminate_now()
 
@@ -212,39 +241,50 @@ async def apply_in_branch(script_path: str, idea: str) -> str:
         finally:
             await handle.terminate_now()
 
-        # console.print("\n[bold yellow]running postcondition checks...[/]")
-        # ok, msg = train_model(wt_path, rel_path)
-        # style = "bold green" if ok else "bold red"
-        # console.print(f"[{style}]postcondition:[/] {msg}")
-        # if not ok:
-        #     raise RuntimeError(f"Postcondition failed: {msg}")
-
     return branch
 
 
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--script", type=str, help="Path to the script to be improved.")
+    parser.add_argument(
+        "--max-num-ideas", type=int, default=5, help="Maximum number of ideas to try."
+    )
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
-    idea = asyncio.run(make_edit_plan(args.script))
 
-    console.print(
-        Panel(
-            Syntax(idea, "markdown", line_numbers=True, theme="default"),
-            title="research idea",
-            box=rich.box.DOUBLE,
+    tried_ideas: list[ResearchIdea] = []
+    for _ in range(args.max_num_ideas):
+        idea: ResearchIdea = asyncio.run(
+            make_reseach_idea(
+                args.script,
+                summary_tried_ideas=[_idea.summary for _idea in tried_ideas],
+                print_src_code=False,
+            )
         )
-    )
 
-    branch = asyncio.run(apply_in_branch(args.script, idea))
-    console.print(
-        f"\n[bold green]done.[/] Changes committed on branch [cyan]{branch}[/]\n"
-        f"Review with: [dim]git diff main...{branch}[/]"
-    )
+        console.print(
+            Panel(
+                Group(
+                    Text(idea.summary, style="bold"),
+                    Text(),
+                    Markdown(idea.description),
+                ),
+                title="research idea",
+                box=rich.box.DOUBLE,
+            )
+        )
+
+        branch = asyncio.run(apply_in_branch(args.script, idea.description))
+        console.print(
+            f"\n[bold green]done.[/] Changes committed on branch [cyan]{branch}[/]\n"
+            f"Review with: [dim]git diff main...{branch}[/]"
+        )
+
+        tried_ideas.append(idea)
 
 
 if __name__ == "__main__":
