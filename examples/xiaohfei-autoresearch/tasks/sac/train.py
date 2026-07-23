@@ -10,6 +10,8 @@ from pathlib import Path
 import gymnasium as gym
 import numpy as np
 import torch
+
+torch.set_num_threads(min(8, torch.get_num_threads()))
 import wandb
 from gymnasium.wrappers.vector import TransformReward
 from jaxtyping import Float
