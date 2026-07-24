@@ -38,11 +38,13 @@ from worktree import git_worktree
 # isort: on
 
 # quick and small test run
+NUM_RUNS: int = 3
 MAX_TIMESTEPS_USED: int = 100  # for large run: 600_000
 LEARNING_STARTS_AT_N_TIMESTEPS: int = 50  # for large run: 1_000
 LOG_EVERY_N_STEPS: int = 5  # for large run: 2500
 
 # large-scale run
+# NUM_RUNS: int = 16
 # MAX_TIMESTEPS_USED: int = 600_000
 # LEARNING_STARTS_AT_N_TIMESTEPS: int = 1_000
 # LOG_EVERY_N_STEPS :int = 2_500
@@ -51,6 +53,7 @@ _MODEL = BedrockModel(
     model_id="us.anthropic.claude-opus-4-8",
     max_tokens=128_000,
     boto_client_config=BotocoreConfig(read_timeout=600),
+    region_name="us-east-1",
 )
 
 PERFORMANCE_MEASURE = textwrap.dedent("""
@@ -303,7 +306,7 @@ async def make_reseach_idea(
 
 def _get_score(
     absolute_script_path: Path,
-    n_runs: int = 16,
+    n_runs: int = NUM_RUNS,
 ) -> tuple[Score, list[list[dict]]]:
     # The training script is not seeded, so independent runs genuinely differ;
     # averaging their scores reduces the variance of the reported number. Each
