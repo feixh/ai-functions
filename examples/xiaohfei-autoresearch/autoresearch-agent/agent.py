@@ -38,10 +38,38 @@ from worktree import git_worktree
 # isort: on
 
 # quick and small test run
-NUM_RUNS: int = 3
+NUM_RUNS: int = 4
 MAX_TIMESTEPS_USED: int = 100  # for large run: 600_000
 LEARNING_STARTS_AT_N_TIMESTEPS: int = 50  # for large run: 1_000
 LOG_EVERY_N_STEPS: int = 5  # for large run: 2500
+
+# MuJoCo tasks the overall score is averaged over. The algorithm's quality is
+# judged by its aggregate performance across all of these, not any single one.
+# Every task must be one of ``train.py``'s SUPPORTED_ENVS.
+TASKS: list[str] = [
+    "HalfCheetah-v5",
+    "Hopper-v5",
+    "Walker2d-v5",
+    "Ant-v5",
+    "Humanoid-v5",
+]
+
+# Different MuJoCo tasks have wildly different reward scales (e.g. HalfCheetah
+# returns dwarf Hopper's), so a raw average would let the high-scale tasks
+# dominate the overall score. Instead each task is scored by its *relative
+# improvement over the baseline*:
+#
+#     normalized = (mean - reference) / max(|reference|, NORMALIZATION_FLOOR)
+#
+# where ``reference`` is the baseline's raw mean return on that task. A
+# difference (not a ratio) is used deliberately because MuJoCo returns are often
+# negative: a ratio would map a negative baseline to -1 and put tasks on unequal
+# footing, whereas the difference makes every task contribute exactly 0 at the
+# baseline and grow positive as it improves — regardless of sign or scale. The
+# denominator floors at this magnitude to avoid blowing up when a baseline
+# reference is near zero, and uses ``abs`` so the mapping stays monotone (higher
+# raw return -> higher normalized score) even when the reference is negative.
+NORMALIZATION_FLOOR: float = 1.0
 
 # large-scale run
 # NUM_RUNS: int = 16
@@ -56,10 +84,16 @@ _MODEL = BedrockModel(
     region_name="us-east-1",
 )
 
-PERFORMANCE_MEASURE = textwrap.dedent("""
+PERFORMANCE_MEASURE = textwrap.dedent(f"""
     ## How is performance measured?
-    - The performance of the implementation on each task is measred by the cumulative return on the task.
-    - The overall performance of the implementation is measured by the average performance across all the tasks considered.
+    - The implementation is evaluated on multiple MuJoCo tasks: {", ".join(TASKS)}.
+    - The performance of the implementation on each task is measured by the cumulative return on the task.
+    - Because the tasks have very different reward scales, each task's return is
+      first normalized by a per-task reference (the baseline's return on that
+      task) so no single task dominates.
+    - The overall performance of the implementation is measured by the average of
+      these normalized per-task scores. Your idea should improve the *aggregate*
+      performance across all tasks, not just one.
 """)
 
 console = Console()
@@ -81,10 +115,38 @@ class ApplyResult(BaseModel):
     message: str
 
 
+class TaskScore(BaseModel):
+    """Per-task performance, aggregated over the seeds run for that task."""
+
+    task: str
+    num_runs: int
+    """Number of seeds averaged for this task."""
+    mean: float
+    """Raw cumulative return on the task, averaged over seeds."""
+    std: float
+    """Std of the raw return across seeds."""
+    normalized_mean: float
+    """Relative improvement of ``mean`` over the per-task baseline reference:
+    ``(mean - reference) / max(|reference|, NORMALIZATION_FLOOR)``. 0 means "at
+    baseline", positive means "better than baseline", so tasks are comparable
+    regardless of reward scale or sign."""
+
+
 class Score(BaseModel):
     num_runs: int
+    """Number of seeds run per task."""
+
     mean: float
+    """Overall score the hill-climb compares on: the mean of the per-task
+    normalized (relative-improvement-over-baseline) means. Averaging *normalized*
+    scores keeps every task on equal footing despite their differing reward
+    scales. ~0 at the baseline; positive when the idea beats the baseline on
+    average."""
     std: float
+
+    """Dispersion of the normalized scores across tasks (task-level spread)."""
+    per_task: list[TaskScore] = Field(default_factory=list)
+    """Per-task breakdown, kept so the aggregate stays interpretable."""
 
 
 class ExperimentResult(BaseModel):
@@ -304,28 +366,67 @@ async def make_reseach_idea(
         await handle.terminate_now()
 
 
+def _reference_from_score(score: Score) -> dict[str, float]:
+    """Per-task reference means to normalize later experiments against.
+
+    The baseline's raw per-task mean is the reference for that task, so every
+    subsequent idea is scored by its relative improvement over the baseline it
+    must beat.
+    """
+    return {ts.task: ts.mean for ts in score.per_task}
+
+
+def _normalize(mean: float, reference: float) -> float:
+    """Relative improvement of ``mean`` over ``reference``.
+
+    A difference (not a ratio) so it behaves correctly when returns are negative:
+    every task contributes 0 at its baseline and grows positive as it improves,
+    regardless of the sign or scale of the reference. The denominator is floored
+    and uses ``abs`` so the mapping stays positive and monotone.
+    """
+    return (mean - reference) / max(abs(reference), NORMALIZATION_FLOOR)
+
+
 def _get_score(
     absolute_script_path: Path,
+    reference: dict[str, float] | None = None,
     n_runs: int = NUM_RUNS,
+    tasks: list[str] = TASKS,
 ) -> tuple[Score, list[list[dict]]]:
-    # The training script is not seeded, so independent runs genuinely differ;
-    # averaging their scores reduces the variance of the reported number. Each
-    # ``train_model`` call runs the script in its own tempdir, so the runs do not
-    # collide, and ``subprocess.run`` releases the GIL, so a thread pool gives
-    # real parallelism.
-    def _run(idx: int) -> PostConditionResultWithScore:
-        # Derive a well-spread, deterministic seed by hashing the run index.
-        # A blake2b digest scatters adjacent indices across the 32-bit range,
-        # avoiding the trivial 0, 1, 2, ... sequence that ``idx`` alone gives.
+    """Score the script by its aggregate performance across ``tasks``.
+
+    Each task is trained ``n_runs`` times (different seeds); the raw returns are
+    averaged per task, normalized against ``reference`` as a relative improvement
+    over the baseline (see ``_normalize``), and the normalized per-task means are
+    averaged into the overall score the hill-climb compares on.
+
+    ``reference=None`` (the baseline call) makes each task its own reference, so
+    the baseline's normalized scores are exactly 0 — the zero point every later
+    idea is measured against.
+
+    The training script's runs genuinely differ by seed, so averaging reduces the
+    variance of the reported number. Each ``train_model`` call runs the script in
+    its own tempdir, so the runs do not collide, and ``subprocess.run`` releases
+    the GIL, so a thread pool gives real parallelism across the whole task × seed
+    grid.
+    """
+
+    def _run(job: tuple[str, int]) -> tuple[str, PostConditionResultWithScore]:
+        task, idx = job
+        # Derive a well-spread, deterministic seed by hashing the task and run
+        # index together. A blake2b digest scatters adjacent indices across the
+        # 32-bit range, and folding in the task name gives each task an
+        # independent seed stream rather than the identical 0, 1, 2, ... per task.
         seed = int.from_bytes(
-            hashlib.blake2b(str(idx).encode(), digest_size=4).digest(), "big"
+            hashlib.blake2b(f"{task}:{idx}".encode(), digest_size=4).digest(), "big"
         )
 
         # The metrics.jsonl lives in a tempdir that ``train_model`` deletes on
         # return, so it parses and hands back the records here — capture the
         # whole result, not just ``.score``, to keep the training curve.
-        return train_model(
+        result = train_model(
             absolute_script_path,
+            env_name=task,
             max_timesteps_used=MAX_TIMESTEPS_USED,
             learning_starts_at_n_timesteps=LEARNING_STARTS_AT_N_TIMESTEPS,
             log_every_n_steps=LOG_EVERY_N_STEPS,
@@ -333,24 +434,69 @@ def _get_score(
             capture_output=False,
             seed=seed,
         )
+        # Tag every metric record with its task so persisted curves stay
+        # attributable to the task they came from once runs are flattened.
+        for record in result.metrics:
+            record.setdefault("task", task)
+        return task, result
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=n_runs) as executor:
-        results = list(executor.map(_run, range(n_runs)))
+    jobs = [(task, idx) for task in tasks for idx in range(n_runs)]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(jobs)) as executor:
+        results = list(executor.map(_run, jobs))
 
-    scores = np.array([r.score for r in results])
-    run_metrics = [r.metrics for r in results]
+    run_metrics = [result.metrics for _, result in results]
 
-    avg_score = np.mean(scores)
-    std_score = np.std(scores)
+    # Aggregate per task, then normalize each task's mean as a relative
+    # improvement over its baseline reference so tasks with different reward
+    # scales (and signs) contribute on equal footing.
+    per_task: list[TaskScore] = []
+    for task in tasks:
+        task_scores = np.array([result.score for t, result in results if t == task])
+        task_mean = float(np.mean(task_scores))
+        task_std = float(np.std(task_scores))
+        # Baseline call (reference is None): the task is its own reference, so its
+        # normalized score is 0 — the zero point later ideas are measured from.
+        ref = reference.get(task, task_mean) if reference else task_mean
+        normalized_mean = _normalize(task_mean, ref)
+        per_task.append(
+            TaskScore(
+                task=task,
+                num_runs=n_runs,
+                mean=task_mean,
+                std=task_std,
+                normalized_mean=normalized_mean,
+            )
+        )
+        logger.info(
+            f"[{task}] scores over {n_runs} runs: "
+            f"{', '.join(f'{s:.2f}' for s in task_scores)} -> "
+            f"avg {task_mean:.2f}; std {task_std:.2f}; "
+            f"normalized {normalized_mean:+.3f} (ref {ref:.2f})"
+        )
+
+    normalized = np.array([ts.normalized_mean for ts in per_task])
+    overall_mean = float(np.mean(normalized))
+    overall_std = float(np.std(normalized))
     logger.info(
-        f"scores over {n_runs} runs: "
-        f"{', '.join(f'{s:.2f}' for s in scores)} -> avg {avg_score:.2f}; std {std_score}"
+        f"overall normalized score across {len(tasks)} tasks: "
+        f"{overall_mean:+.3f} (std {overall_std:.3f})"
     )
-    return Score(num_runs=n_runs, mean=avg_score, std=std_score), run_metrics
+    return (
+        Score(
+            num_runs=n_runs,
+            mean=overall_mean,
+            std=overall_std,
+            per_task=per_task,
+        ),
+        run_metrics,
+    )
 
 
 async def apply_in_branch(
-    script_path: str, summary: str, description: str
+    script_path: str,
+    summary: str,
+    description: str,
+    reference: dict[str, float] | None = None,
 ) -> ExperimentResult:
     repo_root = _repo_root(Path(script_path))
     rel_path = Path(script_path).resolve().relative_to(repo_root)
@@ -396,7 +542,7 @@ async def apply_in_branch(
                 box=rich.box.DOUBLE,
             )
         )
-        score, run_metrics = _get_score(absolute_wt_script_path)
+        score, run_metrics = _get_score(absolute_wt_script_path, reference=reference)
 
     return ExperimentResult(branch=branch, score=score, run_metrics=run_metrics)
 
@@ -455,7 +601,10 @@ def main():
     def _run_baseline():
         baseline_score, baseline_run_metrics = _get_score(Path(args.script).absolute())
         best_score = baseline_score.mean
-        logger.info(f"baseline score = {best_score:0.3f}")
+        # The baseline's raw per-task means become the reference every later idea
+        # is normalized against, so improvements are measured relative to it.
+        reference = _reference_from_score(baseline_score)
+        logger.info(f"baseline score = {best_score:0.3f}; reference = {reference}")
         # Record the baseline like any other experiment so downstream tooling can
         # treat it uniformly. It has no research idea and is the accepted starting
         # point of the hill-climb, hence iteration -1 and accepted=True.
@@ -476,9 +625,9 @@ def main():
                 best_score=best_score,
             ),
         )
-        return best_score
+        return best_score, reference
 
-    best_score = _run_baseline()
+    best_score, reference = _run_baseline()
 
     # Propose and experiment ideas.
     for iteration in range(args.max_num_ideas):
@@ -504,7 +653,10 @@ def main():
 
         result = asyncio.run(
             apply_in_branch(
-                args.script, summary=idea.summary, description=idea.description
+                args.script,
+                summary=idea.summary,
+                description=idea.description,
+                reference=reference,
             )
         )
         console.print(

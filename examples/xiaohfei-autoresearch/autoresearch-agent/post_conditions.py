@@ -29,6 +29,7 @@ class PostConditionResultWithScore(PostConditionResult):
 
 def train_model(
     script_path: Path,
+    env_name: str = "HalfCheetah-v5",
     max_timesteps_used: int = 100,
     learning_starts_at_n_timesteps: int = 50,
     log_every_n_steps: int = 1,
@@ -63,7 +64,7 @@ def train_model(
                 "run",
                 str(script_path),
                 "--env-name",
-                "HalfCheetah-v5",
+                env_name,
                 "--max-timesteps-used",
                 f"{max_timesteps_used}",
                 "--learning-starts-at-n-timesteps",

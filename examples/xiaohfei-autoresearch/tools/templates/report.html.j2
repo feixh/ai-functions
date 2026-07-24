@@ -144,6 +144,10 @@
   .tip .t-row { color: var(--text-secondary); }
   .tip b { color: var(--text-primary); font-variant-numeric: tabular-nums; }
   .empty { color: var(--muted); padding: 24px 0; text-align: center; }
+
+  /* per-task small-multiples grid for the training curves */
+  .task-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px,1fr)); gap: 20px 24px; }
+  .task-plot .task-title { font-size: 13px; font-weight: 600; color: var(--text-primary); margin: 0 0 4px; }
 </style>
 </head>
 <body>
@@ -159,14 +163,14 @@
   <div class="kpis" id="kpis"></div>
 
   <h2>Score progression</h2>
-  <p class="sub" style="margin-top:-4px">Mean cumulative return per idea (± std over runs). The greedy hill-climb keeps an idea only when it beats the running best.</p>
+  <p class="sub" style="margin-top:-4px">Overall normalized score per idea — the mean improvement over baseline across all tasks (± std across tasks). Baseline sits at 0; the greedy hill-climb keeps an idea only when it beats the running best.</p>
   <div class="card">
     <div id="progression"></div>
     <div class="legend" id="prog-legend"></div>
   </div>
 
   <h2>Training curves</h2>
-  <p class="sub" style="margin-top:-4px">Per-iteration training metric over time — mean across runs, shaded ± std, individual runs faint.</p>
+  <p class="sub" style="margin-top:-4px">One plot per task (each on its own reward scale). "Compare all iterations" overlays the mean curve of every idea; "Single iteration" shows that idea's per-seed runs with a ± std band. Baseline is the dashed reference.</p>
   <div class="card">
     <div class="controls">
       <label class="ctl">Metric
@@ -263,7 +267,7 @@ function renderKpis() {
     </div>`).join('');
 
   document.getElementById('subtitle').textContent =
-    `${its.length} iterations · best mean return ${fmt(best)}` +
+    `${its.length} iterations · best normalized score ${fmt(best)}` +
     (baseline!=null ? ` (baseline ${fmt(baseline)})` : '');
 }
 
@@ -311,7 +315,7 @@ function renderProgression() {
     .textContent = 'iteration';
   const yt = el('text', {x:14, y:m.t+ih/2, 'text-anchor':'middle', class:'axis-title',
     transform:`rotate(-90 14 ${m.t+ih/2})`}, svg);
-  yt.textContent = 'mean cumulative return';
+  yt.textContent = 'normalized score (Δ vs baseline)';
 
   // baseline reference line
   if (DATA.baseline!=null) {
@@ -383,45 +387,22 @@ function aggregate(runs, xk, yk) {
   });
 }
 
-function renderCurves() {
-  const host = document.getElementById('curves');
-  host.innerHTML = '';
-  const xk = document.getElementById('xSel').value;
-  const yk = document.getElementById('metricSel').value;
-  const view = document.getElementById('viewSel').value;
-  if (!yk || !xk) { host.innerHTML = '<div class="empty">No metric data.</div>'; return; }
+// Restrict a list of runs to the points belonging to one task, dropping runs
+// that end up empty. ``task === null`` (older logs with no per-point task tag)
+// passes the runs through untouched so a single plot still renders.
+function runsForTask(runs, task) {
+  if (task == null) return runs;
+  return runs
+    .map(run => run.filter(pt => pt.task === task))
+    .filter(run => run.length);
+}
 
-  const its = DATA.iterations.filter(d => d.runs && d.runs.length);
-  const baselineRuns = DATA.baselineRuns || [];
-  if (!its.length && !baselineRuns.length) { host.innerHTML = '<div class="empty">No training curves logged.</div>'; return; }
-
-  // The baseline curve is drawn as a fixed reference in every view, using the
-  // neutral --muted colour and a dashed line so it never collides with an
-  // iteration's series colour.
-  const baselineSeries = baselineRuns.length
-    ? {label:'baseline', iter:null, color:cssv('--muted'), dashed:true,
-       agg: aggregate(baselineRuns, xk, yk), runs: baselineRuns}
-    : null;
-
-  // Build the series to draw.
-  let series = [];  // {label, iter, color, agg, runs?, dashed?}
-  if (view === 'single') {
-    const idx = +document.getElementById('iterSel').value;
-    const d = DATA.iterations[idx];
-    series.push({label:`#${d.iteration}`, iter:d.iteration,
-      color: cssv(SERIES[0]), agg: aggregate(d.runs, xk, yk), runs: d.runs});
-  } else {
-    its.forEach((d,i) => series.push({label:`#${d.iteration}`, iter:d.iteration,
-      color: cssv(SERIES[i % SERIES.length]), agg: aggregate(d.runs, xk, yk)}));
-  }
-  if (baselineSeries && baselineSeries.agg.length) series.unshift(baselineSeries);
-  series = series.filter(s => s.agg.length);
-  if (!series.length) { host.innerHTML = '<div class="empty">Selected metric not present in these runs.</div>'; return; }
-
-  const W = host.clientWidth || 900, H = 360;
+// Draw one task's chart (mean lines + optional std bands / faint runs) into
+// ``svg``. Extents are computed from this task's series alone, so every task is
+// plotted on its own reward scale and never shares an axis with another.
+function drawTaskPlot(svg, series, W, H, xk, yk, view) {
   const m = {t: 16, r: 20, b: 46, l: 66};
   const iw = W - m.l - m.r, ih = H - m.t - m.b;
-  const svg = el('svg', {viewBox:`0 0 ${W} ${H}`, width:W, height:H});
 
   let xmin=Infinity,xmax=-Infinity,ymin=Infinity,ymax=-Infinity;
   series.forEach(s => s.agg.forEach(p => {
@@ -480,7 +461,7 @@ function renderCurves() {
     s.agg.forEach(p => {
       el('circle', {cx:sx(p.x), cy:sy(p.mu), r:3.5, fill:s.color}, svg);
       const hit = el('circle', {cx:sx(p.x), cy:sy(p.mu), r:11, fill:'transparent'}, svg);
-      const html = `<div class="t-title">Iteration ${s.label}</div>`
+      const html = `<div class="t-title">${s.iter==null?'baseline':'Iteration '+s.label}</div>`
         + `<div class="t-row">${xk} <b>${fmt(p.x,0)}</b></div>`
         + `<div class="t-row">${yk} <b>${fmt(p.mu)}</b>${p.n>1?` ± ${fmt(p.sd)}`:''}</div>`
         + (p.n>1?`<div class="t-row">${p.n} runs</div>`:'');
@@ -488,21 +469,92 @@ function renderCurves() {
       hit.addEventListener('mouseleave', hideTip);
     });
   });
+}
 
-  host.appendChild(svg);
+function renderCurves() {
+  const host = document.getElementById('curves');
+  host.innerHTML = '';
+  const xk = document.getElementById('xSel').value;
+  const yk = document.getElementById('metricSel').value;
+  const view = document.getElementById('viewSel').value;
+  if (!yk || !xk) { host.innerHTML = '<div class="empty">No metric data.</div>'; return; }
 
-  // legend
+  const its = DATA.iterations.filter(d => d.runs && d.runs.length);
+  const baselineRuns = DATA.baselineRuns || [];
+  if (!its.length && !baselineRuns.length) { host.innerHTML = '<div class="empty">No training curves logged.</div>'; return; }
+
+  // One plot per task. Older single-task logs carry no per-point task tag, so
+  // fall back to a single untagged plot ([null]) that includes every run.
+  const tasks = (DATA.tasks && DATA.tasks.length) ? DATA.tasks : [null];
+
+  // Build the {label,iter,color,agg,runs?,dashed?} series for one task, filtering
+  // every run down to that task's points before aggregating so scales stay pure.
+  function seriesForTask(task) {
+    const baseTaskRuns = runsForTask(baselineRuns, task);
+    // The baseline is a fixed dashed --muted reference in every view/plot.
+    const baselineSeries = baseTaskRuns.length
+      ? {label:'baseline', iter:null, color:cssv('--muted'), dashed:true,
+         agg: aggregate(baseTaskRuns, xk, yk), runs: baseTaskRuns}
+      : null;
+
+    let series = [];
+    if (view === 'single') {
+      const idx = +document.getElementById('iterSel').value;
+      const d = DATA.iterations[idx];
+      const r = runsForTask(d.runs || [], task);
+      series.push({label:`#${d.iteration}`, iter:d.iteration,
+        color: cssv(SERIES[0]), agg: aggregate(r, xk, yk), runs: r});
+    } else {
+      its.forEach((d,i) => {
+        const r = runsForTask(d.runs, task);
+        series.push({label:`#${d.iteration}`, iter:d.iteration,
+          color: cssv(SERIES[i % SERIES.length]), agg: aggregate(r, xk, yk)});
+      });
+    }
+    if (baselineSeries && baselineSeries.agg.length) series.unshift(baselineSeries);
+    return {series: series.filter(s => s.agg.length), baselineSeries};
+  }
+
+  const grid = document.createElement('div');
+  grid.className = 'task-grid';
+  const W = 460, H = 320;  // fixed per-plot size; the grid wraps responsively
+  let drewAny = false;
+
+  tasks.forEach(task => {
+    const {series} = seriesForTask(task);
+    if (!series.length) return;  // this task has no data for the selected metric
+    drewAny = true;
+
+    const cell = document.createElement('div');
+    cell.className = 'task-plot';
+    if (task != null) {
+      const title = document.createElement('div');
+      title.className = 'task-title';
+      title.textContent = task;
+      cell.appendChild(title);
+    }
+    const svg = el('svg', {viewBox:`0 0 ${W} ${H}`, preserveAspectRatio:'xMidYMid meet'});
+    drawTaskPlot(svg, series, W, H, xk, yk, view);
+    cell.appendChild(svg);
+    grid.appendChild(cell);
+  });
+
+  if (!drewAny) { host.innerHTML = '<div class="empty">Selected metric not present in these runs.</div>'; return; }
+  host.appendChild(grid);
+
+  // Legend is shared across the per-task plots (colours are consistent).
   const leg = document.getElementById('curve-legend');
   const legItem = (s) =>
     `<span class="item"><span class="swatch line" style="background:${s.color}"></span>${s.iter==null?'baseline':'iter '+s.label}</span>`;
-  if (view==='all' && series.length>1) {
-    leg.innerHTML = series.map(legItem).join('');
+  const {series: legendSeries, baselineSeries} = seriesForTask(tasks[0]);
+  if (view==='all' && legendSeries.length>1) {
+    leg.innerHTML = legendSeries.map(legItem).join('');
   } else {
-    // single view: the selected iteration is the primary series; the baseline
-    // (if present) is drawn as an extra dashed reference.
-    const primary = series.find(s => s.iter!=null) || series[0];
-    leg.innerHTML = `<span class="item"><span class="swatch line" style="background:${primary.color}"></span>mean</span>`
-      + `<span class="item"><span class="swatch" style="background:${primary.color};opacity:.18"></span>individual runs / ± std</span>`
+    const primary = legendSeries.find(s => s.iter!=null) || legendSeries[0];
+    leg.innerHTML = (primary
+        ? `<span class="item"><span class="swatch line" style="background:${primary.color}"></span>mean</span>`
+          + `<span class="item"><span class="swatch" style="background:${primary.color};opacity:.18"></span>individual runs / ± std</span>`
+        : '')
       + (baselineSeries && baselineSeries.agg.length ? legItem(baselineSeries) : '');
   }
 }

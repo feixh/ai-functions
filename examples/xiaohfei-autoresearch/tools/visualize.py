@@ -67,6 +67,7 @@ def build_payload(records: list[dict]) -> dict:
     """
     iterations: list[dict] = []
     metric_keys: set[str] = set()
+    tasks: set[str] = set()
     baseline = None
     baseline_runs: list = []
 
@@ -77,6 +78,12 @@ def build_payload(records: list[dict]) -> dict:
                 metric_keys.update(
                     k for k, v in point.items() if isinstance(v, (int, float))
                 )
+                # Each record is tagged with the MuJoCo task it came from (added
+                # by the agent's ``_get_score``). Collect the distinct tasks so
+                # the front-end can render one plot per task — different tasks
+                # have wildly different reward scales and must not share a y-axis.
+                if isinstance(point.get("task"), str):
+                    tasks.add(point["task"])
             runs.append(run)
         return runs
 
@@ -135,6 +142,10 @@ def build_payload(records: list[dict]) -> dict:
         "defaultMetric": default_metric,
         "baseline": baseline,
         "baselineRuns": baseline_runs,
+        # Sorted list of the distinct MuJoCo tasks present in the runs. Empty for
+        # older single-task logs whose records carry no ``task`` tag; the
+        # front-end falls back to a single untagged plot in that case.
+        "tasks": sorted(tasks),
     }
 
 
