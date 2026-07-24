@@ -38,10 +38,10 @@ from worktree import git_worktree
 # isort: on
 
 # quick and small test run
-NUM_RUNS: int = 4
-MAX_TIMESTEPS_USED: int = 100  # for large run: 600_000
-LEARNING_STARTS_AT_N_TIMESTEPS: int = 50  # for large run: 1_000
-LOG_EVERY_N_STEPS: int = 5  # for large run: 2500
+# NUM_RUNS: int = 4
+# MAX_TIMESTEPS_USED: int = 100  # for large run: 600_000
+# LEARNING_STARTS_AT_N_TIMESTEPS: int = 50  # for large run: 1_000
+# LOG_EVERY_N_STEPS: int = 5  # for large run: 2500
 
 # MuJoCo tasks the overall score is averaged over. The algorithm's quality is
 # judged by its aggregate performance across all of these, not any single one.
@@ -72,10 +72,39 @@ TASKS: list[str] = [
 NORMALIZATION_FLOOR: float = 1.0
 
 # large-scale run
-# NUM_RUNS: int = 16
-# MAX_TIMESTEPS_USED: int = 600_000
-# LEARNING_STARTS_AT_N_TIMESTEPS: int = 1_000
-# LOG_EVERY_N_STEPS :int = 2_500
+NUM_RUNS: int = 4
+MAX_TIMESTEPS_USED: int = 600_000
+LEARNING_STARTS_AT_N_TIMESTEPS: int = 1_000
+LOG_EVERY_N_STEPS: int = 1_000
+
+
+# MuJoCo tasks the overall score is averaged over. The algorithm's quality is
+# judged by its aggregate performance across all of these, not any single one.
+# Every task must be one of ``train.py``'s SUPPORTED_ENVS.
+TASKS: list[str] = [
+    "HalfCheetah-v5",
+    "Hopper-v5",
+    "Walker2d-v5",
+    "Ant-v5",
+    "Humanoid-v5",
+]
+
+# Different MuJoCo tasks have wildly different reward scales (e.g. HalfCheetah
+# returns dwarf Hopper's), so a raw average would let the high-scale tasks
+# dominate the overall score. Instead each task is scored by its *relative
+# improvement over the baseline*:
+#
+#     normalized = (mean - reference) / max(|reference|, NORMALIZATION_FLOOR)
+#
+# where ``reference`` is the baseline's raw mean return on that task. A
+# difference (not a ratio) is used deliberately because MuJoCo returns are often
+# negative: a ratio would map a negative baseline to -1 and put tasks on unequal
+# footing, whereas the difference makes every task contribute exactly 0 at the
+# baseline and grow positive as it improves — regardless of sign or scale. The
+# denominator floors at this magnitude to avoid blowing up when a baseline
+# reference is near zero, and uses ``abs`` so the mapping stays monotone (higher
+# raw return -> higher normalized score) even when the reference is negative.
+NORMALIZATION_FLOOR: float = 1.0
 
 _MODEL = BedrockModel(
     model_id="us.anthropic.claude-opus-4-8",
