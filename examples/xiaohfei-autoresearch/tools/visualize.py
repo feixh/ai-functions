@@ -68,18 +68,9 @@ def build_payload(records: list[dict]) -> dict:
     iterations: list[dict] = []
     metric_keys: set[str] = set()
     baseline = None
+    baseline_runs: list = []
 
-    for rec in records:
-        result = rec.get("result", {})
-        score = result.get("score", {})
-        run_metrics = result.get("run_metrics", []) or []
-
-        # ``best_score`` is the running best *after* this iteration; for a
-        # rejected iteration 0 the best is unchanged, so it recovers the
-        # pre-loop baseline score.
-        if baseline is None and rec.get("iteration") == 0 and not rec.get("accepted"):
-            baseline = rec.get("best_score")
-
+    def _collect_metric_keys(run_metrics: list) -> list:
         runs = []
         for run in run_metrics:
             for point in run:
@@ -87,6 +78,29 @@ def build_payload(records: list[dict]) -> dict:
                     k for k, v in point.items() if isinstance(v, (int, float))
                 )
             runs.append(run)
+        return runs
+
+    for rec in records:
+        result = rec.get("result", {})
+        score = result.get("score", {})
+        run_metrics = result.get("run_metrics", []) or []
+
+        # The baseline is logged by ``agent.py`` as its own record with
+        # ``iteration == -1`` (the unmodified starting implementation, before
+        # any idea). Pull its mean out as the baseline reference and keep it out
+        # of ``iterations`` so it doesn't render as a bogus ``#-1`` idea or
+        # inflate the counts — but still capture its per-run curves so they can
+        # be drawn alongside the ideas' training curves. Older logs without an
+        # explicit baseline record fall back to the running-best after a
+        # rejected iteration 0 (and have no baseline curves to plot).
+        if rec.get("iteration") == -1:
+            baseline = score.get("mean")
+            baseline_runs = _collect_metric_keys(run_metrics)
+            continue
+        if baseline is None and rec.get("iteration") == 0 and not rec.get("accepted"):
+            baseline = rec.get("best_score")
+
+        runs = _collect_metric_keys(run_metrics)
 
         iterations.append(
             {
@@ -120,6 +134,7 @@ def build_payload(records: list[dict]) -> dict:
         "defaultX": default_x,
         "defaultMetric": default_metric,
         "baseline": baseline,
+        "baselineRuns": baseline_runs,
     }
 
 

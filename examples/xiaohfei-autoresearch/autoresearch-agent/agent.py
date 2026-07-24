@@ -37,6 +37,16 @@ from worktree import git_worktree
 
 # isort: on
 
+# quick and small test run
+MAX_TIMESTEPS_USED: int = 100  # for large run: 600_000
+LEARNING_STARTS_AT_N_TIMESTEPS: int = 50  # for large run: 1_000
+LOG_EVERY_N_STEPS: int = 5  # for large run: 2500
+
+# large-scale run
+# MAX_TIMESTEPS_USED: int = 600_000
+# LEARNING_STARTS_AT_N_TIMESTEPS: int = 1_000
+# LOG_EVERY_N_STEPS :int = 2_500
+
 _MODEL = BedrockModel(
     model_id="us.anthropic.claude-opus-4-8",
     max_tokens=128_000,
@@ -292,7 +302,8 @@ async def make_reseach_idea(
 
 
 def _get_score(
-    absolute_script_path: Path, n_runs: int = 16
+    absolute_script_path: Path,
+    n_runs: int = 16,
 ) -> tuple[Score, list[list[dict]]]:
     # The training script is not seeded, so independent runs genuinely differ;
     # averaging their scores reduces the variance of the reported number. Each
@@ -312,9 +323,9 @@ def _get_score(
         # whole result, not just ``.score``, to keep the training curve.
         return train_model(
             absolute_script_path,
-            max_timesteps_used=1_000_000,
-            learning_starts_at_n_timesteps=1_000,
-            log_every_n_steps=1_000,
+            max_timesteps_used=MAX_TIMESTEPS_USED,
+            learning_starts_at_n_timesteps=LEARNING_STARTS_AT_N_TIMESTEPS,
+            log_every_n_steps=LOG_EVERY_N_STEPS,
             timeout_seconds=3600 * 10,  # 10 hours
             capture_output=False,
             seed=seed,
@@ -437,8 +448,34 @@ def main():
             box=rich.box.DOUBLE,
         )
     )
-    best_score = _get_score(Path(args.script).absolute())[0].mean
-    logger.info(f"baseline score = {best_score:0.3f}")
+
+    def _run_baseline():
+        baseline_score, baseline_run_metrics = _get_score(Path(args.script).absolute())
+        best_score = baseline_score.mean
+        logger.info(f"baseline score = {best_score:0.3f}")
+        # Record the baseline like any other experiment so downstream tooling can
+        # treat it uniformly. It has no research idea and is the accepted starting
+        # point of the hill-climb, hence iteration -1 and accepted=True.
+        append_record(
+            results_path,
+            ExperimentRecord(
+                iteration=-1,
+                idea=ResearchIdea(
+                    summary="baseline",
+                    description="The unmodified starting implementation.",
+                ),
+                result=ExperimentResult(
+                    branch=base_branch,
+                    score=baseline_score,
+                    run_metrics=baseline_run_metrics,
+                ),
+                accepted=True,
+                best_score=best_score,
+            ),
+        )
+        return best_score
+
+    best_score = _run_baseline()
 
     # Propose and experiment ideas.
     for iteration in range(args.max_num_ideas):

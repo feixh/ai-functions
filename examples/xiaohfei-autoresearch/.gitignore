@@ -2,3 +2,4 @@
 .lab/
 wandb/
 *.png
+_notes.md

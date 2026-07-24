@@ -392,10 +392,19 @@ function renderCurves() {
   if (!yk || !xk) { host.innerHTML = '<div class="empty">No metric data.</div>'; return; }
 
   const its = DATA.iterations.filter(d => d.runs && d.runs.length);
-  if (!its.length) { host.innerHTML = '<div class="empty">No training curves logged.</div>'; return; }
+  const baselineRuns = DATA.baselineRuns || [];
+  if (!its.length && !baselineRuns.length) { host.innerHTML = '<div class="empty">No training curves logged.</div>'; return; }
+
+  // The baseline curve is drawn as a fixed reference in every view, using the
+  // neutral --muted colour and a dashed line so it never collides with an
+  // iteration's series colour.
+  const baselineSeries = baselineRuns.length
+    ? {label:'baseline', iter:null, color:cssv('--muted'), dashed:true,
+       agg: aggregate(baselineRuns, xk, yk), runs: baselineRuns}
+    : null;
 
   // Build the series to draw.
-  let series = [];  // {label, iter, color, agg, runs?}
+  let series = [];  // {label, iter, color, agg, runs?, dashed?}
   if (view === 'single') {
     const idx = +document.getElementById('iterSel').value;
     const d = DATA.iterations[idx];
@@ -405,6 +414,7 @@ function renderCurves() {
     its.forEach((d,i) => series.push({label:`#${d.iteration}`, iter:d.iteration,
       color: cssv(SERIES[i % SERIES.length]), agg: aggregate(d.runs, xk, yk)}));
   }
+  if (baselineSeries && baselineSeries.agg.length) series.unshift(baselineSeries);
   series = series.filter(s => s.agg.length);
   if (!series.length) { host.innerHTML = '<div class="empty">Selected metric not present in these runs.</div>'; return; }
 
@@ -463,8 +473,10 @@ function renderCurves() {
 
   // mean lines
   series.forEach(s => {
-    el('path', {d:line(s.agg), fill:'none', stroke:s.color, 'stroke-width':2,
-      'stroke-linejoin':'round'}, svg);
+    const attrs = {d:line(s.agg), fill:'none', stroke:s.color, 'stroke-width':2,
+      'stroke-linejoin':'round'};
+    if (s.dashed) attrs['stroke-dasharray'] = '5 4';
+    el('path', attrs, svg);
     s.agg.forEach(p => {
       el('circle', {cx:sx(p.x), cy:sy(p.mu), r:3.5, fill:s.color}, svg);
       const hit = el('circle', {cx:sx(p.x), cy:sy(p.mu), r:11, fill:'transparent'}, svg);
@@ -481,12 +493,17 @@ function renderCurves() {
 
   // legend
   const leg = document.getElementById('curve-legend');
+  const legItem = (s) =>
+    `<span class="item"><span class="swatch line" style="background:${s.color}"></span>${s.iter==null?'baseline':'iter '+s.label}</span>`;
   if (view==='all' && series.length>1) {
-    leg.innerHTML = series.map(s =>
-      `<span class="item"><span class="swatch line" style="background:${s.color}"></span>iter ${s.label}</span>`).join('');
+    leg.innerHTML = series.map(legItem).join('');
   } else {
-    leg.innerHTML = `<span class="item"><span class="swatch line" style="background:${series[0].color}"></span>mean</span>`
-      + `<span class="item"><span class="swatch" style="background:${series[0].color};opacity:.18"></span>individual runs / ± std</span>`;
+    // single view: the selected iteration is the primary series; the baseline
+    // (if present) is drawn as an extra dashed reference.
+    const primary = series.find(s => s.iter!=null) || series[0];
+    leg.innerHTML = `<span class="item"><span class="swatch line" style="background:${primary.color}"></span>mean</span>`
+      + `<span class="item"><span class="swatch" style="background:${primary.color};opacity:.18"></span>individual runs / ± std</span>`
+      + (baselineSeries && baselineSeries.agg.length ? legItem(baselineSeries) : '');
   }
 }
 
