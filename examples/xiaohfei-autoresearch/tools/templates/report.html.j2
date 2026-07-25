@@ -145,8 +145,8 @@
   .tip b { color: var(--text-primary); font-variant-numeric: tabular-nums; }
   .empty { color: var(--muted); padding: 24px 0; text-align: center; }
 
-  /* per-task small-multiples grid for the training curves */
-  .task-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px,1fr)); gap: 20px 24px; }
+  /* per-task training curves — one plot per row (single column) */
+  .task-grid { display: grid; grid-template-columns: 1fr; gap: 28px; }
   .task-plot .task-title { font-size: 13px; font-weight: 600; color: var(--text-primary); margin: 0 0 4px; }
 </style>
 </head>
@@ -517,7 +517,7 @@ function renderCurves() {
 
   const grid = document.createElement('div');
   grid.className = 'task-grid';
-  const W = 460, H = 320;  // fixed per-plot size; the grid wraps responsively
+  const W = 920, H = 300;  // wide aspect ratio: one full-width plot per row
   let drewAny = false;
 
   tasks.forEach(task => {
